@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -21,7 +22,8 @@ const (
 )
 
 type Store struct {
-	dir string
+	dir        string
+	metadataMu sync.Mutex
 }
 
 type State struct {
@@ -48,12 +50,13 @@ type PosterItem struct {
 }
 
 type ReportStats struct {
-	Updated   int  `json:"updated"`
-	DryRun    int  `json:"dry_run"`
-	Skipped   int  `json:"skipped"`
-	Ambiguous int  `json:"ambiguous"`
-	Failed    int  `json:"failed"`
-	Cancelled bool `json:"cancelled"`
+	Updated      int  `json:"updated"`
+	DryRun       int  `json:"dry_run"`
+	WikiFallback int  `json:"wiki_fallback"`
+	Skipped      int  `json:"skipped"`
+	Ambiguous    int  `json:"ambiguous"`
+	Failed       int  `json:"failed"`
+	Cancelled    bool `json:"cancelled"`
 }
 
 type ReportItem struct {
@@ -145,6 +148,12 @@ func (s *Store) SaveLastSelection(serverID, serverName, serverURI, libraryKey, l
 }
 
 func (s *Store) LoadMetadata() (PosterMetadata, error) {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	return s.loadMetadataUnlocked()
+}
+
+func (s *Store) loadMetadataUnlocked() (PosterMetadata, error) {
 	metadata := PosterMetadata{Items: map[string]PosterItem{}}
 	if err := readJSON(filepath.Join(s.dir, metadataFile), &metadata); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -159,7 +168,9 @@ func (s *Store) LoadMetadata() (PosterMetadata, error) {
 }
 
 func (s *Store) MarkPosterUpdated(item PosterItem) error {
-	metadata, err := s.LoadMetadata()
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	metadata, err := s.loadMetadataUnlocked()
 	if err != nil {
 		return err
 	}
@@ -169,7 +180,9 @@ func (s *Store) MarkPosterUpdated(item PosterItem) error {
 }
 
 func (s *Store) PosterUpdated(ratingKey string) (bool, error) {
-	metadata, err := s.LoadMetadata()
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	metadata, err := s.loadMetadataUnlocked()
 	if err != nil {
 		return false, err
 	}

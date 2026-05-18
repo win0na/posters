@@ -17,6 +17,7 @@ func main() {
 	configDir := flag.String("config-dir", "", "config directory for state and metadata")
 	dryRun := flag.Bool("dry-run", false, "find matches without uploading posters or recording metadata")
 	force := flag.Bool("force", false, "include movies already recorded as updated")
+	wikiFallback := flag.Bool("wiki-fallback", false, "use Wikipedia theatrical poster when IMP match is missing or ambiguous")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -32,7 +33,7 @@ func main() {
 
 	client := plex.NewClient(store)
 	program := tea.NewProgram(
-		tui.NewWithOptions(store, client, tui.Options{Force: *force, DryRun: *dryRun}),
+		tui.NewWithOptions(store, client, tui.Options{Force: *force, DryRun: *dryRun, WikiFallback: *wikiFallback}),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)

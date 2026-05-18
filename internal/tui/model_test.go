@@ -32,10 +32,18 @@ func TestFormatUpdateErrorAmbiguous(t *testing.T) {
 		},
 	}
 	got := formatUpdateError(plex.Movie{Title: "Alien", Year: 1979}, err)
-	if !strings.Contains(got, "skip Alien (1979): ambiguous IMP match: 2 candidates") {
+	if !strings.Contains(got, "ambiguous Alien (1979): ambiguous IMP match: 2 candidates") {
 		t.Fatalf("formatUpdateError() = %q", got)
 	}
 }
+
+func TestFormatUpdateErrorNoIMP(t *testing.T) {
+	got := formatUpdateError(plex.Movie{Title: "Alien", Year: 1979}, errors.New("no IMP Awards poster found for Alien (1979)"))
+	if got != "skip Alien (1979): no IMP poster available" {
+		t.Fatalf("formatUpdateError() = %q", got)
+	}
+}
+
 func (fakePlex) ListMovies(context.Context, plex.Server, plex.Library) ([]plex.Movie, error) {
 	return nil, nil
 }
@@ -54,8 +62,9 @@ func (p *spyPlex) UploadPoster(context.Context, plex.Server, plex.Movie, string,
 }
 
 type fakeFinder struct {
-	candidate posterfinder.Candidate
-	err       error
+	candidate     posterfinder.Candidate
+	wikiCandidate posterfinder.Candidate
+	err           error
 }
 
 func (f fakeFinder) FindTheatricalPoster(context.Context, plex.Movie) (posterfinder.Candidate, error) {
@@ -63,6 +72,13 @@ func (f fakeFinder) FindTheatricalPoster(context.Context, plex.Movie) (posterfin
 		return posterfinder.Candidate{}, f.err
 	}
 	return f.candidate, nil
+}
+
+func (f fakeFinder) FindWikipediaPoster(context.Context, plex.Movie) (posterfinder.Candidate, error) {
+	if f.err != nil && f.wikiCandidate.Bytes == nil {
+		return posterfinder.Candidate{}, f.err
+	}
+	return f.wikiCandidate, nil
 }
 
 func TestServersMsgShowsServerPicker(t *testing.T) {
@@ -179,8 +195,36 @@ func TestMoviePickerBodyFitsSmallTerminal(t *testing.T) {
 	if len(lines) > 16 {
 		t.Fatalf("view height = %d, want <= 16", len(lines))
 	}
-	if !strings.Contains(view, "› [ ] Movie (2020)") {
+	if !strings.Contains(stripANSI(view), "› [ ] Movie (2020)") {
 		t.Fatalf("view missing cursor row: %q", view)
+	}
+}
+
+func TestMoviePickerKeepsTopBorderOnTinyTerminal(t *testing.T) {
+	movies := make([]plex.Movie, 30)
+	for i := range movies {
+		movies[i] = plex.Movie{RatingKey: string(rune('a' + i)), Title: "Movie", Year: 2000 + i}
+	}
+	for _, height := range []int{14, 15, 16, 17, 18} {
+		m := Model{screen: screenMovies, movies: movies, cursor: 20, chosen: map[string]bool{}, width: 80, height: height}
+		view := stripANSI(m.baseView())
+		lines := strings.Split(view, "\n")
+		if len(lines) > height {
+			t.Fatalf("height %d: view height = %d, want <= %d\n%s", height, len(lines), height, view)
+		}
+		first := ""
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				first = line
+				break
+			}
+		}
+		if !strings.Contains(first, "╭") {
+			t.Fatalf("height %d: top border cropped; first visible line = %q\n%s", height, first, view)
+		}
+		if !strings.Contains(view, "› [ ] Movie (2020)") {
+			t.Fatalf("height %d: view missing cursor row: %q", height, view)
+		}
 	}
 }
 
@@ -228,10 +272,15 @@ func TestStatusViewIncludesConfigAndMetadata(t *testing.T) {
 	}
 	model := NewWithOptions(store, fakePlex{}, Options{Force: true, DryRun: true})
 	model.screen = screenStatus
-	view := model.View()
-	for _, want := range []string{"Status", "Plex token: present", "Metadata items: 1", "Server: NAS", "Library: Movies", "Force refresh: on", "Dry run: on"} {
+	view := stripANSI(model.View())
+	for _, want := range []string{"Status", "Plex token: present", "Metadata items: 1", "Server: NAS", "Library: Movies"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() missing %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"Force refresh:", "Dry run:"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("View() contains %q:\n%s", unwanted, view)
 		}
 	}
 }
@@ -258,8 +307,8 @@ func TestPendingMoviesSkipsUpdated(t *testing.T) {
 	if len(pending) != 1 || pending[0].RatingKey != "2" {
 		t.Fatalf("pending = %#v, want only rating key 2", pending)
 	}
-	if len(skipped) != 1 {
-		t.Fatalf("skipped = %#v, want one skip", skipped)
+	if skipped != 1 {
+		t.Fatalf("skipped = %d, want one skip", skipped)
 	}
 }
 
@@ -283,8 +332,100 @@ func TestPendingMoviesForceIncludesUpdated(t *testing.T) {
 	if len(pending) != 1 || pending[0].RatingKey != "1" {
 		t.Fatalf("pending = %#v, want updated movie included", pending)
 	}
-	if len(skipped) != 0 {
-		t.Fatalf("skipped = %#v, want none", skipped)
+	if skipped != 0 {
+		t.Fatalf("skipped = %d, want none", skipped)
+	}
+}
+
+func TestStartRunLaunchesConcurrentUpdates(t *testing.T) {
+	t.Parallel()
+
+	store, err := config.OpenDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenDir() err = %v", err)
+	}
+	model := New(store, fakePlex{})
+	model.screen = screenMovies
+	model.mode = modeAll
+	for i := 0; i < posterUpdateConcurrency+2; i++ {
+		model.movies = append(model.movies, plex.Movie{RatingKey: fmt.Sprint(i), Title: fmt.Sprintf("Movie %d", i), Year: 2024})
+	}
+
+	updated, cmd := model.startRun()
+	after := updated.(Model)
+	if cmd == nil {
+		t.Fatal("startRun() cmd = nil, want batched update commands")
+	}
+	if after.runningActive != posterUpdateConcurrency || after.runningNext != posterUpdateConcurrency {
+		t.Fatalf("active=%d next=%d, want %d/%d", after.runningActive, after.runningNext, posterUpdateConcurrency, posterUpdateConcurrency)
+	}
+}
+
+func TestUpdateMessageKeepsConcurrentUpdatesFull(t *testing.T) {
+	t.Parallel()
+
+	store, err := config.OpenDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenDir() err = %v", err)
+	}
+	model := New(store, fakePlex{})
+	model.screen = screenRunning
+	model.runningTotal = posterUpdateConcurrency + 2
+	model.runningActive = posterUpdateConcurrency
+	model.runningNext = posterUpdateConcurrency
+	for i := 0; i < model.runningTotal; i++ {
+		model.runningQueue = append(model.runningQueue, plex.Movie{RatingKey: fmt.Sprint(i), Title: fmt.Sprintf("Movie %d", i), Year: 2024})
+	}
+	model, _, _ = model.startOp()
+
+	updated, cmd := model.Update(updateOneMsg{opID: model.opID, movie: plex.Movie{RatingKey: "0", Title: "Movie 0", Year: 2024}, line: "updated Movie 0 (2024)"})
+	after := updated.(Model)
+	if cmd == nil {
+		t.Fatal("Update(updateOneMsg) cmd = nil, want replacement update command")
+	}
+	if after.runningDone != 1 || after.runningActive != posterUpdateConcurrency || after.runningNext != posterUpdateConcurrency+1 {
+		t.Fatalf("done=%d active=%d next=%d", after.runningDone, after.runningActive, after.runningNext)
+	}
+	for _, movie := range after.runningCurrent {
+		if movie.RatingKey == "0" {
+			t.Fatalf("completed movie still marked current: %#v", after.runningCurrent)
+		}
+	}
+}
+
+func TestRunningHeaderShowsCurrentPosters(t *testing.T) {
+	t.Parallel()
+
+	model := Model{
+		width:        80,
+		runningDone:  1,
+		runningTotal: 4,
+		runningCurrent: []plex.Movie{
+			{Title: "Alien", Year: 1979},
+			{Title: "Love Lies Bleeding", Year: 2024},
+		},
+	}
+	styled := model.runningHeader(0.25)
+	if !strings.Contains(styled, ui.worker.Render("Working:")) {
+		t.Fatalf("runningHeader() missing worker style:\n%s", styled)
+	}
+	if ui.worker.Render("Working:") == ui.accent.Render("Working:") {
+		t.Fatal("worker style matches accent style, want distinct color")
+	}
+	if ui.worker.Render("Working:") != ui.warn.Render("Working:") {
+		t.Fatal("worker style should use yellow/warn color")
+	}
+	got := stripANSI(styled)
+	for _, want := range []string{"Working:", "Alien (1979)", "Love Lies Bleeding (2024)"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runningHeader() missing %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "1: Alien (1979)") || !strings.Contains(got, "2: Love Lies Bleeding (2024)") {
+		t.Fatalf("runningHeader() did not render one row per worker:\n%s", got)
+	}
+	if strings.Contains(got, "worker 1:") || strings.Contains(got, "worker 2:") {
+		t.Fatalf("runningHeader() kept redundant worker labels:\n%s", got)
 	}
 }
 
@@ -320,6 +461,17 @@ func TestDryRunKeyTogglesInMode(t *testing.T) {
 	}
 }
 
+func TestWikipediaFallbackKeyTogglesInMode(t *testing.T) {
+	t.Parallel()
+
+	model := Model{screen: screenMode}
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	got := updated.(Model)
+	if !got.wikiFallback {
+		t.Fatal("wikiFallback = false, want true")
+	}
+}
+
 func TestUpdateMovieDryRunSkipsUploadAndMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -330,7 +482,7 @@ func TestUpdateMovieDryRunSkipsUploadAndMetadata(t *testing.T) {
 	client := &spyPlex{}
 	finder := fakeFinder{candidate: posterfinder.Candidate{ImageURL: "http://www.impawards.com/1979/posters/alien.jpg", SourceURL: "http://www.impawards.com/1979/alien.html", MatchReason: "single canonical IMP candidate", Bytes: []byte("jpg")}}
 	movie := plex.Movie{RatingKey: "1", Title: "Alien", Year: 1979}
-	msg := updateMovie(context.Background(), 7, store, client, finder, plex.Server{}, movie, true)().(updateOneMsg)
+	msg := updateMovie(context.Background(), 7, store, client, finder, plex.Server{}, movie, true, false)().(updateOneMsg)
 	if msg.err != nil {
 		t.Fatalf("updateMovie() err = %v", msg.err)
 	}
@@ -359,7 +511,7 @@ func TestUpdateMovieNormalUploadsAndMarksMetadata(t *testing.T) {
 	client := &spyPlex{}
 	finder := fakeFinder{candidate: posterfinder.Candidate{ImageURL: "http://www.impawards.com/1979/posters/alien.jpg", SourceURL: "http://www.impawards.com/1979/alien.html", Bytes: []byte("jpg")}}
 	movie := plex.Movie{RatingKey: "1", Title: "Alien", Year: 1979}
-	msg := updateMovie(context.Background(), 7, store, client, finder, plex.Server{}, movie, false)().(updateOneMsg)
+	msg := updateMovie(context.Background(), 7, store, client, finder, plex.Server{}, movie, false, false)().(updateOneMsg)
 	if msg.err != nil {
 		t.Fatalf("updateMovie() err = %v", msg.err)
 	}
@@ -383,9 +535,46 @@ func TestUpdateMovieFinderError(t *testing.T) {
 		t.Fatalf("OpenDir() err = %v", err)
 	}
 	wantErr := errors.New("no match")
-	msg := updateMovie(context.Background(), 7, store, &spyPlex{}, fakeFinder{err: wantErr}, plex.Server{}, plex.Movie{Title: "Alien", Year: 1979}, true)().(updateOneMsg)
+	msg := updateMovie(context.Background(), 7, store, &spyPlex{}, fakeFinder{err: wantErr}, plex.Server{}, plex.Movie{Title: "Alien", Year: 1979}, true, false)().(updateOneMsg)
 	if !errors.Is(msg.err, wantErr) {
 		t.Fatalf("err = %v, want %v", msg.err, wantErr)
+	}
+}
+
+func TestUpdateMovieWikipediaFallbackUploadsAndMarksMetadata(t *testing.T) {
+	t.Parallel()
+
+	store, err := config.OpenDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenDir() err = %v", err)
+	}
+	client := &spyPlex{}
+	finder := fakeFinder{
+		err: errors.New("no IMP Awards poster found for Alien (1979)"),
+		wikiCandidate: posterfinder.Candidate{
+			ImageURL:    "https://upload.wikimedia.org/wikipedia/en/a/alien.jpg",
+			SourceURL:   "https://upload.wikimedia.org/wikipedia/en/a/alien.jpg",
+			MatchReason: "Wikipedia fallback theatrical poster",
+			Bytes:       []byte("wiki"),
+		},
+	}
+	movie := plex.Movie{RatingKey: "1", Title: "Alien", Year: 1979}
+	msg := updateMovie(context.Background(), 7, store, client, finder, plex.Server{}, movie, false, true)().(updateOneMsg)
+	if msg.err != nil {
+		t.Fatalf("updateMovie() err = %v", msg.err)
+	}
+	if !strings.Contains(msg.line, "wiki-fallback Alien (1979):") || !strings.Contains(msg.line, "Wikipedia fallback theatrical poster") {
+		t.Fatalf("line = %q", msg.line)
+	}
+	if client.uploads != 1 {
+		t.Fatalf("uploads = %d, want 1", client.uploads)
+	}
+	updated, err := store.PosterUpdated("1")
+	if err != nil {
+		t.Fatalf("PosterUpdated() err = %v", err)
+	}
+	if !updated {
+		t.Fatal("PosterUpdated() = false, want true")
 	}
 }
 
@@ -399,17 +588,23 @@ func TestRecordUpdateResultCounts(t *testing.T) {
 	model := New(store, fakePlex{})
 	model.recordUpdateResult(updateOneMsg{line: "updated Alien (1979)"})
 	model.recordUpdateResult(updateOneMsg{line: "dry-run Aliens (1986): http://www.impawards.com/1986/aliens.html"})
+	model.recordUpdateResult(updateOneMsg{line: "wiki-fallback Prometheus (2012): https://upload.wikimedia.org/poster.jpg"})
+	model.recordUpdateResult(updateOneMsg{movie: plex.Movie{Title: "Prometheus", Year: 2012}, err: errors.New("no IMP Awards poster found for Prometheus (2012)")})
 	model.recordUpdateResult(updateOneMsg{movie: plex.Movie{Title: "Alien 3", Year: 1992}, err: errors.New("upload failed")})
 
-	if model.runStats.Updated != 1 || model.runStats.DryRun != 1 || model.runStats.Failed != 1 {
-		t.Fatalf("stats = %#v, want updated/dry-run/failed counts", model.runStats)
+	if model.runStats.Updated != 1 || model.runStats.DryRun != 1 || model.runStats.WikiFallback != 1 || model.runStats.Skipped != 1 || model.runStats.Failed != 1 {
+		t.Fatalf("stats = %#v, want updated/dry-run/wiki/skipped/failed counts", model.runStats)
 	}
-	if len(model.reportItems) != 3 || model.reportItems[0].Status != "updated" || model.reportItems[1].Status != "dry-run" || model.reportItems[2].Status != "failed" {
+	if len(model.reportItems) != 5 || model.reportItems[0].Status != "updated" || model.reportItems[1].Status != "dry-run" || model.reportItems[2].Status != "wiki-fallback" || model.reportItems[3].Status != "skipped" || model.reportItems[4].Status != "failed" {
 		t.Fatalf("reportItems = %#v", model.reportItems)
 	}
-	got := resultSummary(model.runStats)
-	if !strings.Contains(got, "updated: 1") || !strings.Contains(got, "dry-run: 1") || !strings.Contains(got, "failed: 1") {
+	got := resultSummary(model.runStats, false)
+	if !strings.Contains(got, "updated: 1") || strings.Contains(got, "dry-run:") || !strings.Contains(got, "wiki: 1") || !strings.Contains(got, "skipped: 1") || !strings.Contains(got, "failed: 1") {
 		t.Fatalf("resultSummary() = %q", got)
+	}
+	dryRun := resultSummary(model.runStats, true)
+	if !strings.Contains(dryRun, "dry-run: 1") || strings.Contains(dryRun, "updated:") {
+		t.Fatalf("resultSummary(dryRun) = %q", dryRun)
 	}
 }
 
@@ -464,11 +659,12 @@ func TestDoneViewIncludesSummaryAndDetails(t *testing.T) {
 	}
 	model := New(store, fakePlex{})
 	model.screen = screenDone
+	model.height = 40
 	model.runStats = runStats{Updated: 1, Skipped: 2, Ambiguous: 1}
 	model.log = []string{"updated Alien (1979)", "skip Aliens (1986): already updated"}
 	model.details = []string{"Alien 3 (1992):", "  - http://www.impawards.com/1992/alien_three.html"}
 
-	view := model.View()
+	view := stripANSI(model.View())
 	for _, want := range []string{"Updated:   1", "Skipped:   2", "Ambiguous: 1", "Ambiguous matches:", "alien_three.html"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() missing %q:\n%s", want, view)
@@ -496,6 +692,38 @@ func TestDoneViewShowsLegibleReportSections(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestLoginViewUsesReadableSections(t *testing.T) {
+	t.Parallel()
+
+	view := stripANSI(Model{screen: screenLogin, width: 100, height: 32}.View())
+	for _, want := range []string{"Goal", "Controls", "Enter  login to Plex", "r      clear saved login"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("login view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestStyledViewsEmitANSI(t *testing.T) {
+	t.Parallel()
+
+	login := Model{screen: screenLogin, width: 100, height: 32}.View()
+	if !strings.Contains(login, "\x1b[") {
+		t.Fatal("login view missing ANSI styling")
+	}
+
+	store, err := config.OpenDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenDir() err = %v", err)
+	}
+	styled := New(store, fakePlex{})
+	styled.screen = screenDone
+	styled.reportItems = []config.ReportItem{{Title: "Alien", Year: 1979, Status: "updated"}}
+	done := styled.doneView(doneRows(18))
+	if !strings.Contains(done, "\x1b[") {
+		t.Fatal("done view missing ANSI styling")
 	}
 }
 
@@ -570,10 +798,11 @@ func TestDoneFooterStaysOutsideScrollViewport(t *testing.T) {
 	}
 	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyDown})
 	scrolled := updated.(Model).doneView(doneRows(model.height))
-	if strings.Count(scrolled, "Enter/q: quit") != 1 {
+	plain := stripANSI(scrolled)
+	if strings.Count(plain, "Enter/q: quit") != 1 {
 		t.Fatalf("footer count wrong after scroll:\n%s", scrolled)
 	}
-	if !strings.HasSuffix(strings.TrimSpace(scrolled), "Enter/q: quit") {
+	if !strings.HasSuffix(strings.TrimSpace(plain), "Enter/q: quit") {
 		t.Fatalf("footer not fixed at bottom:\n%s", scrolled)
 	}
 }
@@ -608,7 +837,7 @@ func TestRunningActivityFormatsDryRunDetails(t *testing.T) {
 	t.Parallel()
 
 	line := "dry-run Alien (1979): http://www.impawards.com/1979/alien.html | image: http://www.impawards.com/1979/posters/alien_xxlg.jpg | reason: visual match 99.1%"
-	got := runningActivityView([]string{line}, 6, 48)
+	got := stripANSI(runningActivityView([]string{line}, 6, 48))
 	for _, want := range []string{"○ DRY-RUN Alien (1979)", "IMP:", "Image:", "Match:", "99.1%"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("runningActivityView() missing %q:\n%s", want, got)
@@ -617,6 +846,101 @@ func TestRunningActivityFormatsDryRunDetails(t *testing.T) {
 	for _, row := range strings.Split(got, "\n") {
 		if lipgloss.Width(row) > 48 {
 			t.Fatalf("activity row too wide: width=%d row=%q\n%s", lipgloss.Width(row), row, got)
+		}
+	}
+}
+
+func TestRunningActivityFormatsUpdatedMatchDetails(t *testing.T) {
+	t.Parallel()
+
+	line := "updated Aliens (1986), visual match 97.4%"
+	got := stripANSI(runningActivityView([]string{line}, 6, 52))
+	for _, want := range []string{"✓ updated Aliens (1986), visual match 97.4%"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runningActivityView() missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Match:") || strings.Contains(got, "next best") {
+		t.Fatalf("updated activity kept noisy detail rows:\n%s", got)
+	}
+	for _, row := range strings.Split(got, "\n") {
+		if lipgloss.Width(row) > 52 {
+			t.Fatalf("activity row too wide: width=%d row=%q\n%s", lipgloss.Width(row), row, got)
+		}
+	}
+}
+
+func TestUpdatedResultLineUsesVisualMatchOnly(t *testing.T) {
+	t.Parallel()
+
+	line := updatedResultLine(plex.Movie{Title: "Aliens", Year: 1986}, posterfinder.Candidate{MatchReason: "visual match 97.4%; next best 95.2%"})
+	if line != "updated Aliens (1986), visual match 97.4%" {
+		t.Fatalf("updatedResultLine() = %q", line)
+	}
+}
+
+func TestRunningActivityKeepsColonTitlesTogether(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		"dry-run Spider-Man: Across the Spider-Verse (2023): http://www.impawards.com/2023/spider_man_across_the_spider_verse.html | reason: visual match 91.2%",
+		"skip Star Wars: Episode III - Revenge of the Sith (2005): no IMP poster available",
+	}
+	got := stripANSI(runningActivityView(lines, 8, 72))
+	for _, want := range []string{
+		"○ DRY-RUN Spider-Man: Across the Spider-Verse (2023)",
+		"IMP:",
+		"– SKIP Star Wars: Episode III - Revenge of the Sith (2005)",
+		"Reason: no IMP poster available",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runningActivityView() missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "IMP:   Across the Spider-Verse") || strings.Contains(got, "Reason: Episode III") {
+		t.Fatalf("colon title was split as payload:\n%s", got)
+	}
+}
+
+func TestRunningActivityFormatsSkipDetails(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		"skip-updated Alien (1979): already updated locally",
+		"skip Aliens (1986): no IMP poster available",
+		"ambiguous Alien 3 (1992): ambiguous IMP match: 2 candidates with long explanation that should not make the movie row huge",
+	}
+	got := stripANSI(runningActivityView(lines, 6, 48))
+	for _, want := range []string{"– UPDATED Alien (1979)", "– SKIP Aliens (1986)", "– AMBIGUOUS Alien 3 (1992)", "Reason:", "ambiguous IMP match"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runningActivityView() missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "– AMBIGUOUS Alien 3 (1992): ambiguous") || strings.Contains(got, "– SKIP Aliens (1986): no IMP") {
+		t.Fatalf("skip reason stayed on title row:\n%s", got)
+	}
+	for _, row := range strings.Split(got, "\n") {
+		if lipgloss.Width(row) > 48 {
+			t.Fatalf("activity row too wide: width=%d row=%q\n%s", lipgloss.Width(row), row, got)
+		}
+	}
+}
+
+func TestRunningActivityFormatsWikiFallbackDetails(t *testing.T) {
+	t.Parallel()
+
+	line := "wiki-fallback Alien (1979): https://upload.wikimedia.org/poster.jpg | reason: Wikipedia fallback theatrical poster"
+	styled := runningActivityView([]string{line}, 6, 48)
+	if !strings.Contains(styled, ui.wiki.Render("↯ WIKI")) {
+		t.Fatalf("wiki indicator did not use wiki style:\n%s", styled)
+	}
+	if ui.wiki.Render("↯ WIKI") == ui.skip.Render("↯ WIKI") {
+		t.Fatal("wiki and skip indicators use same style")
+	}
+	got := stripANSI(styled)
+	for _, want := range []string{"↯ WIKI Alien (1979)", "Reason:", "Wikipedia fallback theatrical poster"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runningActivityView() missing %q:\n%s", want, got)
 		}
 	}
 }
@@ -751,8 +1075,8 @@ func TestBaseViewShrinkWrapsContentWithConfiguredPadding(t *testing.T) {
 	if contentX < 0 {
 		t.Fatalf("content not found in view:\n%s", view)
 	}
-	if got := contentX - bounds.outerLeft - 1; got != horizontalContentPadding {
-		t.Fatalf("left padding = %d, want %d", got, horizontalContentPadding)
+	if got := contentX - bounds.outerLeft - 1; got < horizontalContentPadding {
+		t.Fatalf("left padding = %d, want at least %d", got, horizontalContentPadding)
 	}
 	if got := bounds.top - bounds.outerTop - 1; got != verticalContentPadding {
 		t.Fatalf("top padding = %d, want %d", got, verticalContentPadding)

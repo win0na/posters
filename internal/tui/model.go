@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/win0na/posters/internal/config"
 	"github.com/win0na/posters/internal/plex"
 	posterfinder "github.com/win0na/posters/internal/posters"
@@ -22,6 +23,7 @@ var urlRE = regexp.MustCompile(`https?://[^\s|]+`)
 const horizontalContentPadding = 10
 const lipglossHorizontalPadding = horizontalContentPadding - 2
 const verticalContentPadding = 2
+const posterUpdateConcurrency = 4
 
 const (
 	panelGap           = 2
@@ -54,6 +56,9 @@ type uiTheme struct {
 	dim         lipgloss.Style
 	good        lipgloss.Style
 	warn        lipgloss.Style
+	skip        lipgloss.Style
+	wiki        lipgloss.Style
+	worker      lipgloss.Style
 	bad         lipgloss.Style
 	accent      lipgloss.Style
 	accent2     lipgloss.Style
@@ -66,7 +71,12 @@ type uiTheme struct {
 	code        lipgloss.Style
 }
 
-var ui = newUITheme()
+var ui uiTheme
+
+func init() {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	ui = newUITheme()
+}
 
 func newUITheme() uiTheme {
 	base := lipgloss.NewStyle().Foreground(frameTextColor)
@@ -84,6 +94,9 @@ func newUITheme() uiTheme {
 		dim:         dim,
 		good:        base.Bold(true).Foreground(accentGreen),
 		warn:        base.Bold(true).Foreground(accentAmber),
+		skip:        base.Bold(true).Foreground(accentMagenta),
+		wiki:        base.Bold(true).Foreground(accentBlue),
+		worker:      base.Bold(true).Foreground(accentAmber),
 		bad:         base.Bold(true).Foreground(accentRed),
 		accent:      base.Bold(true).Foreground(accentCyan),
 		accent2:     base.Bold(true).Foreground(accentMagenta),
@@ -120,12 +133,13 @@ const (
 )
 
 type runStats struct {
-	Updated   int
-	DryRun    int
-	Skipped   int
-	Ambiguous int
-	Failed    int
-	Cancelled bool
+	Updated      int
+	DryRun       int
+	WikiFallback int
+	Skipped      int
+	Ambiguous    int
+	Failed       int
+	Cancelled    bool
 }
 
 type Plex interface {
@@ -139,11 +153,13 @@ type Plex interface {
 
 type PosterFinder interface {
 	FindTheatricalPoster(context.Context, plex.Movie) (posterfinder.Candidate, error)
+	FindWikipediaPoster(context.Context, plex.Movie) (posterfinder.Candidate, error)
 }
 
 type Options struct {
-	Force  bool
-	DryRun bool
+	Force        bool
+	DryRun       bool
+	WikiFallback bool
 }
 
 type Model struct {
@@ -157,31 +173,35 @@ type Model struct {
 	width   int
 	height  int
 
-	pin     plex.Pin
-	authURL string
-	server  plex.Server
-	servers []plex.Server
-	library plex.Library
-	libs    []plex.Library
-	movies  []plex.Movie
-	mode    mode
-	force   bool
-	dryRun  bool
-	cursor  int
-	chosen  map[string]bool
+	pin          plex.Pin
+	authURL      string
+	server       plex.Server
+	servers      []plex.Server
+	library      plex.Library
+	libs         []plex.Library
+	movies       []plex.Movie
+	mode         mode
+	force        bool
+	dryRun       bool
+	wikiFallback bool
+	cursor       int
+	chosen       map[string]bool
 
-	runningTotal  int
-	runningDone   int
-	runningQueue  []plex.Movie
-	runStats      runStats
-	reportItems   []config.ReportItem
-	reportPath    string
-	reportCSVPath string
-	log           []string
-	details       []string
-	notice        string
-	err           error
-	selection     selectionState
+	runningTotal   int
+	runningDone    int
+	runningNext    int
+	runningActive  int
+	runningQueue   []plex.Movie
+	runningCurrent []plex.Movie
+	runStats       runStats
+	reportItems    []config.ReportItem
+	reportPath     string
+	reportCSVPath  string
+	log            []string
+	details        []string
+	notice         string
+	err            error
+	selection      selectionState
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -243,18 +263,19 @@ func NewWithOptions(store *config.Store, client Plex, options Options) Model {
 		opID = 1
 	}
 	return Model{
-		store:   store,
-		plex:    client,
-		finder:  posterfinder.NewService(),
-		screen:  initialScreen,
-		spinner: sp,
-		bar:     progress.New(progress.WithDefaultGradient()),
-		chosen:  map[string]bool{},
-		force:   options.Force,
-		dryRun:  options.DryRun,
-		ctx:     ctx,
-		cancel:  cancel,
-		opID:    opID,
+		store:        store,
+		plex:         client,
+		finder:       posterfinder.NewService(),
+		screen:       initialScreen,
+		spinner:      sp,
+		bar:          progress.New(progress.WithDefaultGradient()),
+		chosen:       map[string]bool{},
+		force:        options.Force,
+		dryRun:       options.DryRun,
+		wikiFallback: options.WikiFallback,
+		ctx:          ctx,
+		cancel:       cancel,
+		opID:         opID,
 	}
 }
 
@@ -345,6 +366,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.isActive(msg.opID) {
 			return m, nil
 		}
+		m.runningActive = max(0, m.runningActive-1)
+		m.runningCurrent = removeRunningCurrent(m.runningCurrent, msg.movie)
 		m.runningDone++
 		m.recordUpdateResult(msg)
 		if msg.err != nil {
@@ -352,16 +375,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.log = append(m.log, msg.line)
 		}
-		m.cursor = max(0, m.cursorLimit()-1)
 		if m.runningDone >= m.runningTotal {
 			m = m.finishRun(false)
 			m.screen = screenDone
 			return m, nil
 		}
-		return m, tea.Batch(
-			m.bar.SetPercent(float64(m.runningDone)/float64(max(1, m.runningTotal))),
-			updateMovie(m.ctx, msg.opID, m.store, m.plex, m.finder, m.server, m.runningQueue[m.runningDone], m.dryRun),
-		)
+		cmds := []tea.Cmd{m.bar.SetPercent(float64(m.runningDone) / float64(max(1, m.runningTotal)))}
+		m, cmds = m.launchUpdateBatch(m.ctx, msg.opID, cmds)
+		m.cursor = max(0, m.cursorLimit()-1)
+		return m, tea.Batch(cmds...)
 	case doneMsg:
 		m.screen = screenDone
 		return m, nil
@@ -410,6 +432,11 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		if m.screen == screenMode || m.screen == screenMovies {
 			m.dryRun = !m.dryRun
+		}
+		return m, nil
+	case "w":
+		if m.screen == screenMode || m.screen == screenMovies {
+			m.wikiFallback = !m.wikiFallback
 		}
 		return m, nil
 	case "r":
@@ -483,23 +510,28 @@ func (m Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) startRun() (tea.Model, tea.Cmd) {
 	selected := m.selectedMovies()
-	pending, skipped, err := m.pendingMovies(selected)
+	pending, skippedUpdated, err := m.pendingMovies(selected)
 	if err != nil {
 		return m.fail(err)
 	}
 	m.runningQueue = pending
 	m.runningTotal = len(pending)
 	m.runningDone = 0
-	m.runStats = runStats{Skipped: len(skipped)}
+	m.runningNext = 0
+	m.runningActive = 0
+	m.runningCurrent = nil
+	m.runStats = runStats{Skipped: skippedUpdated}
 	m.reportItems = nil
 	m.reportPath = ""
 	m.reportCSVPath = ""
-	m.log = skipped
+	m.log = nil
 	m.details = nil
 	m.cursor = 0
 	m.screen = screenRunning
 	if len(pending) == 0 {
-		if len(m.log) == 0 {
+		if skippedUpdated > 0 {
+			m.log = []string{fmt.Sprintf("all selected movies already updated locally (%d skipped)", skippedUpdated)}
+		} else {
 			m.log = []string{"no movies selected"}
 		}
 		m = m.finishRun(false)
@@ -509,28 +541,62 @@ func (m Model) startRun() (tea.Model, tea.Cmd) {
 	var ctx context.Context
 	var opID int
 	m, ctx, opID = m.startOp()
-	return m, tea.Batch(m.spinner.Tick, m.bar.SetPercent(0), updateMovie(ctx, opID, m.store, m.plex, m.finder, m.server, pending[0], m.dryRun))
+	cmds := []tea.Cmd{m.spinner.Tick, m.bar.SetPercent(0)}
+	m, cmds = m.launchUpdateBatch(ctx, opID, cmds)
+	return m, tea.Batch(cmds...)
 }
 
-func (m Model) pendingMovies(selected []plex.Movie) ([]plex.Movie, []string, error) {
+func (m Model) launchUpdateBatch(ctx context.Context, opID int, cmds []tea.Cmd) (Model, []tea.Cmd) {
+	limit := min(posterUpdateConcurrency, m.runningTotal)
+	for m.runningActive < limit && m.runningNext < m.runningTotal {
+		movie := m.runningQueue[m.runningNext]
+		m.runningNext++
+		m.runningActive++
+		m.runningCurrent = append(m.runningCurrent, movie)
+		cmds = append(cmds, updateMovie(ctx, opID, m.store, m.plex, m.finder, m.server, movie, m.dryRun, m.wikiFallback))
+	}
+	return m, cmds
+}
+
+func removeRunningCurrent(current []plex.Movie, done plex.Movie) []plex.Movie {
+	out := current[:0]
+	removed := false
+	for _, movie := range current {
+		if !removed && sameMovie(movie, done) {
+			removed = true
+			continue
+		}
+		out = append(out, movie)
+	}
+	return out
+}
+
+func sameMovie(a, b plex.Movie) bool {
+	if a.RatingKey != "" || b.RatingKey != "" {
+		return a.RatingKey == b.RatingKey
+	}
+	return a.Title == b.Title && a.Year == b.Year
+}
+
+func (m Model) pendingMovies(selected []plex.Movie) ([]plex.Movie, int, error) {
 	metadata, err := m.store.LoadMetadata()
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 	pending := make([]plex.Movie, 0, len(selected))
-	skipped := []string{}
+	skippedUpdated := 0
 	for _, movie := range selected {
 		if m.force {
 			pending = append(pending, movie)
 			continue
 		}
 		if _, ok := metadata.Items[movie.RatingKey]; ok {
-			skipped = append(skipped, fmt.Sprintf("skip %s (%d): already updated", movie.Title, movie.Year))
+			skippedUpdated++
 			continue
 		}
 		pending = append(pending, movie)
 	}
-	return pending, skipped, nil
+	return pending, skippedUpdated, nil
 }
 
 func (m Model) selectedMovies() []plex.Movie {
@@ -549,6 +615,12 @@ func (m Model) selectedMovies() []plex.Movie {
 func (m *Model) recordUpdateResult(msg updateOneMsg) {
 	item := config.ReportItem{RatingKey: msg.movie.RatingKey, Title: msg.movie.Title, Year: msg.movie.Year, Message: msg.line, SourceURL: msg.sourceURL, ImageURL: msg.imageURL, MatchReason: msg.matchReason}
 	if msg.err == nil {
+		if strings.HasPrefix(msg.line, "wiki-fallback ") {
+			m.runStats.WikiFallback++
+			item.Status = "wiki-fallback"
+			m.reportItems = append(m.reportItems, item)
+			return
+		}
 		if strings.HasPrefix(msg.line, "dry-run ") {
 			m.runStats.DryRun++
 			item.Status = "dry-run"
@@ -568,6 +640,14 @@ func (m *Model) recordUpdateResult(msg updateOneMsg) {
 		item.Message = ambiguous.Summary()
 		m.reportItems = append(m.reportItems, item)
 		m.details = append(m.details, formatAmbiguousDetails(msg.movie, ambiguous)...)
+		return
+	}
+	if isNoIMPPosterError(msg.err) {
+		m.runStats.Skipped++
+		item.Status = "skipped"
+		item.Message = "no IMP poster available"
+		item.Error = ""
+		m.reportItems = append(m.reportItems, item)
 		return
 	}
 	m.runStats.Failed++
@@ -594,7 +674,7 @@ func (m Model) finishRun(cancelled bool) Model {
 }
 
 func reportStats(stats runStats) config.ReportStats {
-	return config.ReportStats{Updated: stats.Updated, DryRun: stats.DryRun, Skipped: stats.Skipped, Ambiguous: stats.Ambiguous, Failed: stats.Failed, Cancelled: stats.Cancelled}
+	return config.ReportStats{Updated: stats.Updated, DryRun: stats.DryRun, WikiFallback: stats.WikiFallback, Skipped: stats.Skipped, Ambiguous: stats.Ambiguous, Failed: stats.Failed, Cancelled: stats.Cancelled}
 }
 
 func (m Model) fail(err error) (tea.Model, tea.Cmd) {
@@ -662,36 +742,60 @@ func (m Model) body() string {
 	body := ""
 	switch m.screen {
 	case screenLogin:
-		body = "Update Plex movie posters to original theatrical posters."
+		body = section("Goal", "Update Plex movie posters to original theatrical posters.")
 		if m.notice != "" {
-			body += "\n\n" + m.notice
+			body += "\n\n" + section("Notice", m.notice)
 		}
-		body += "\n\nEnter: login to Plex\ns: status\nr: clear saved login\nq: quit"
+		body += "\n\n" + controls("Enter  login to Plex", "s      status", "r      clear saved login", "q      quit")
 	case screenAuthWait:
 		if m.authURL != "" {
-			body = fmt.Sprintf("%s Waiting for Plex login\n\nOpen:\n%s\n\nCode: %s\n\nEnter: poll now\nEsc: cancel", m.spinner.View(), m.authURL, m.pin.Code)
+			body = section("Plex login", m.spinner.View()+" Waiting for browser approval") + "\n\n" + section("Open", m.authURL) + "\n\n" + section("Code", m.pin.Code) + "\n\n" + controls("Enter  poll now", "Esc    cancel")
 		} else {
-			body = m.spinner.View() + " Loading...\n\nEsc: cancel"
+			body = section("Loading", m.spinner.View()+" Contacting Plex...") + "\n\n" + controls("Esc    cancel")
 		}
 	case screenServers:
-		body = "Choose Plex server:\n\n" + renderChoices(m.servers, m.cursor, func(s plex.Server) string { return serverLabel(s) }) + "\n\ns: status"
+		body = section("Choose Plex server", styleChoiceList(renderChoices(m.servers, m.cursor, func(s plex.Server) string { return serverLabel(s) }), m.cursor)) + "\n\n" + controls("s      status")
 	case screenLibraries:
-		body = "Choose movie library:\n\n" + renderChoices(m.libs, m.cursor, func(l plex.Library) string { return l.Title }) + "\n\nEsc: servers\ns: status"
+		body = section("Choose movie library", styleChoiceList(renderChoices(m.libs, m.cursor, func(l plex.Library) string { return l.Title }), m.cursor)) + "\n\n" + controls("Esc    servers", "s      status")
 	case screenMode:
-		body = "Update mode:\n\n" + renderLines([]string{"All posters (default)", "Specific posters"}, m.cursor) + "\n\n" + optionLines(m.force, m.dryRun)
+		body = section("Update mode", styleChoiceList(renderLines([]string{"All posters (default)", "Specific posters"}, m.cursor), m.cursor)) + "\n\n" + section("Options", optionLines(m.force, m.dryRun, m.wikiFallback))
 	case screenMovies:
-		body = "Select movies (space toggles, enter starts, esc back):\n\n" + renderMovies(m.movies, m.cursor, m.chosen, movieListRows(m.height)) + "\n\n" + optionLines(m.force, m.dryRun)
+		body = m.movieBody()
 	case screenStatus:
-		body = m.statusView() + "\n\nEnter/s: back"
+		body = m.statusView() + "\n\n" + controls("Enter  back", "s      back")
 	case screenRunning:
 		percent := float64(m.runningDone) / float64(max(1, m.runningTotal))
 		body = m.runningView(percent)
 	case screenDone:
 		body = m.doneView(doneRows(m.height))
 	case screenError:
-		body = fmt.Sprintf("Error: %v\n\nr: clear saved login and reauthenticate\nEnter/q: quit", m.err)
+		body = section("Error", fmt.Sprintf("%v", m.err)) + "\n\n" + controls("r      clear saved login and reauthenticate", "Enter  quit", "q      quit")
 	}
 	return body
+}
+
+func (m Model) movieBody() string {
+	if m.height <= 0 {
+		return m.movieBodyForRows(movieListRows(m.height))
+	}
+	for rows := movieListRows(m.height); rows >= 1; rows-- {
+		body := m.movieBodyForRows(rows)
+		if renderedLineCount(shellSized(body, m.width, m.height)) <= m.height {
+			return body
+		}
+	}
+	return m.movieBodyForRows(1)
+}
+
+func (m Model) movieBodyForRows(rows int) string {
+	movies := styleMovieList(renderMovies(m.movies, m.cursor, m.chosen, rows), m.cursor, m.chosen)
+	if m.height > 0 && m.height <= 14 {
+		return ui.frameTitle.Render("Select movies") + "\n" + movies + "\n\n" + ui.footer.Render("space toggle · Enter start · Esc back")
+	}
+	if m.height > 0 && m.height <= 18 {
+		return ui.frameTitle.Render("Select movies") + "\n" + movies + "\n\n" + ui.footer.Render("space toggle · Enter start · Esc back") + "\n" + optionLines(m.force, m.dryRun, m.wikiFallback)
+	}
+	return section("Select movies", movies) + "\n\n" + controls("space  toggle", "Enter  start", "Esc    back") + "\n\n" + section("Options", optionLines(m.force, m.dryRun, m.wikiFallback))
 }
 
 type dashboardPane struct {
@@ -808,10 +912,11 @@ func (m Model) modeBody() string {
 		icon:     "◌",
 		accent:   accentCyan,
 		body: strings.Join([]string{
-			optionLines(m.force, m.dryRun),
+			optionLines(m.force, m.dryRun, m.wikiFallback),
 			"",
 			"f: force refresh",
 			"d: dry run",
+			"w: wiki fallback",
 			"Enter starts",
 		}, "\n"),
 	}
@@ -833,7 +938,7 @@ func (m Model) moviesBody() string {
 		accent:   accentAmber,
 		body: strings.Join([]string{
 			fmt.Sprintf("Selected: %d / %d", chosenCount(m.chosen), len(m.movies)),
-			optionLines(m.force, m.dryRun),
+			optionLines(m.force, m.dryRun, m.wikiFallback),
 			"",
 			"Space: toggle row",
 			"Enter: update now",
@@ -893,7 +998,7 @@ func (m Model) runningBody(percent float64) string {
 	} else {
 		left := dashboardPane{
 			title:    "Progress",
-			subtitle: resultSummary(m.runStats),
+			subtitle: resultSummary(m.runStats, m.dryRun),
 			icon:     "▣",
 			accent:   accentGreen,
 			body:     header,
@@ -1100,15 +1205,13 @@ func (m Model) statusView() string {
 		library = "none"
 	}
 	return strings.Join([]string{
-		"Status",
+		ui.frameTitle.Render("Status"),
 		"",
-		"Config: " + m.store.Dir(),
-		"Plex token: " + token,
-		fmt.Sprintf("Metadata items: %d", len(metadata.Items)),
-		"Server: " + server,
-		"Library: " + library,
-		forceLine(m.force),
-		dryRunLine(m.dryRun),
+		styleKeyValueLine("Config: " + m.store.Dir()),
+		styleKeyValueLine("Plex token: " + token),
+		styleKeyValueLine(fmt.Sprintf("Metadata items: %d", len(metadata.Items))),
+		styleKeyValueLine("Server: " + server),
+		styleKeyValueLine("Library: " + library),
 	}, "\n")
 }
 
@@ -1154,14 +1257,18 @@ func serverLabel(server plex.Server) string {
 	return server.Name
 }
 
-func optionLines(force bool, dryRun bool) string {
-	return forceLine(force) + "\n" + dryRunLine(dryRun)
+func optionLines(force bool, dryRun bool, wikiFallback bool) string {
+	return styleToggleLine(forceLine(force)) + "\n" + styleToggleLine(dryRunLine(dryRun)) + "\n" + styleToggleLine(wikiFallbackLine(wikiFallback))
 }
 
-func resultSummary(stats runStats) string {
+func resultSummary(stats runStats, dryRun bool) string {
+	processed := fmt.Sprintf("updated: %d", stats.Updated)
+	if dryRun {
+		processed = fmt.Sprintf("dry-run: %d", stats.DryRun)
+	}
 	parts := []string{
-		fmt.Sprintf("updated: %d", stats.Updated),
-		fmt.Sprintf("dry-run: %d", stats.DryRun),
+		processed,
+		fmt.Sprintf("wiki: %d", stats.WikiFallback),
 		fmt.Sprintf("skipped: %d", stats.Skipped),
 		fmt.Sprintf("ambiguous: %d", stats.Ambiguous),
 		fmt.Sprintf("failed: %d", stats.Failed),
@@ -1176,6 +1283,7 @@ func resultSummaryBlock(stats runStats) string {
 	lines := []string{
 		fmt.Sprintf("Updated:   %d", stats.Updated),
 		fmt.Sprintf("Dry runs:  %d", stats.DryRun),
+		fmt.Sprintf("Wiki:      %d", stats.WikiFallback),
 		fmt.Sprintf("Skipped:   %d", stats.Skipped),
 		fmt.Sprintf("Ambiguous: %d", stats.Ambiguous),
 		fmt.Sprintf("Failed:    %d", stats.Failed),
@@ -1186,17 +1294,60 @@ func resultSummaryBlock(stats runStats) string {
 	return strings.Join(lines, "\n")
 }
 
+func section(title, body string) string {
+	title = ui.frameTitle.Render(title)
+	if strings.TrimSpace(body) == "" {
+		return title
+	}
+	return title + "\n" + indentBlock(body, "  ")
+}
+
+func controls(lines ...string) string {
+	styled := make([]string, 0, len(lines))
+	for _, line := range lines {
+		styled = append(styled, styleBindingLine(line))
+	}
+	return section("Controls", strings.Join(styled, "\n"))
+}
+
 func (m Model) runningView(percent float64) string {
 	header := m.runningHeader(percent)
-	activity := viewportLines(runningActivityLines(m.log, 0, contentWidth(m.width)), m.cursor, m.runningViewportRows())
-	if activity == "" {
+	rows := m.runningViewportRows()
+	activity := viewportLines(runningActivityLines(m.log, 0, contentWidth(m.width)), m.cursor, rows)
+	if activity == "" && rows > 0 {
 		activity = "  waiting for first update..."
 	}
-	return header + "\n" + activity + "\n\nEsc: cancel"
+	if activity == "" {
+		return header + "\n" + ui.footer.Render("Esc: cancel")
+	}
+	return header + "\n" + activity + "\n\n" + ui.footer.Render("Esc: cancel")
 }
 
 func (m Model) runningHeader(percent float64) string {
-	return fmt.Sprintf("%s Updating posters %d/%d\n%s\n\n%s\n\nActivity:", m.spinner.View(), m.runningDone, m.runningTotal, resultSummary(m.runStats), m.bar.ViewAs(percent))
+	return fmt.Sprintf("%s %s %d/%d\n%s\n%s\n\n%s\n\n%s:", ui.accent.Render(m.spinner.View()), ui.frameTitle.Render("Updating posters"), m.runningDone, m.runningTotal, ui.muted.Render(resultSummary(m.runStats, m.dryRun)), m.currentPostersLines(contentWidth(m.width)), m.bar.ViewAs(percent), ui.frameTitle.Render("Activity"))
+}
+
+func (m Model) currentPostersLines(width int) string {
+	if len(m.runningCurrent) == 0 {
+		return ui.worker.Render("Working:") + " " + ui.muted.Render("waiting for available worker")
+	}
+	lines := []string{ui.worker.Render("Working:")}
+	for i, movie := range m.runningCurrent {
+		line := fmt.Sprintf("  %d: %s", i+1, movieLabel(movie))
+		if width > 0 && lipgloss.Width(line) > width {
+			cut := visibleCut(line, max(1, width-1))
+			line = strings.TrimRight(line[:cut], " ") + "…"
+		}
+		lines = append(lines, ui.worker.Render(line))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func movieLabel(movie plex.Movie) string {
+	if movie.Year > 0 {
+		return fmt.Sprintf("%s (%d)", movie.Title, movie.Year)
+	}
+	return movie.Title
 }
 
 func (m Model) runningViewportRows() int {
@@ -1204,7 +1355,7 @@ func (m Model) runningViewportRows() int {
 }
 
 func (m Model) doneView(maxRows int) string {
-	footer := "Enter/q: quit"
+	footer := ui.footer.Render("Enter/q: quit")
 	view := viewportLines(m.doneFullLines(), m.cursor, doneViewportRows(maxRows))
 	if view == "" {
 		return footer
@@ -1217,24 +1368,24 @@ func doneViewportRows(maxRows int) int {
 }
 
 func (m Model) doneFullLines() []string {
-	sections := []string{"Done.", "Summary:\n" + indentBlock(resultSummaryBlock(m.runStats), "  ")}
+	sections := []string{ui.frameTitle.Render("Done."), section("Summary:", styleSummaryBlock(resultSummaryBlock(m.runStats)))}
 	if m.reportPath != "" || m.reportCSVPath != "" {
 		lines := []string{}
 		if m.reportPath != "" {
-			lines = append(lines, "JSON: "+m.reportPath)
+			lines = append(lines, stylePathLine("JSON: ", m.reportPath))
 		}
 		if m.reportCSVPath != "" {
-			lines = append(lines, "CSV:  "+m.reportCSVPath)
+			lines = append(lines, stylePathLine("CSV:  ", m.reportCSVPath))
 		}
-		sections = append(sections, "Reports:\n"+indentBlock(strings.Join(lines, "\n"), "  "))
+		sections = append(sections, section("Reports:", strings.Join(lines, "\n")))
 	}
 	if results := reportItemsView(m.reportItems); results != "" {
-		sections = append(sections, "Results:\n"+results)
+		sections = append(sections, section("Results:", results))
 	} else if recent := recentActivityView(m.log, 8); recent != "" {
-		sections = append(sections, "Recent activity:\n"+recent)
+		sections = append(sections, section("Recent activity:", recent))
 	}
 	if details := tail(m.details, 8); details != "" {
-		sections = append(sections, "Ambiguous matches:\n"+indentBlock(details, "  "))
+		sections = append(sections, section("Ambiguous matches:", indentBlock(details, "  ")))
 	}
 	return strings.Split(strings.Join(sections, "\n\n"), "\n")
 }
@@ -1255,24 +1406,24 @@ func formatReportItem(item config.ReportItem) string {
 	if status == "" {
 		status = "RESULT"
 	}
-	header := fmt.Sprintf("  %s %s", status, item.Title)
+	header := fmt.Sprintf("  %s %s", styleReportStatus(status), item.Title)
 	if item.Year > 0 {
 		header += fmt.Sprintf(" (%d)", item.Year)
 	}
 	lines := []string{header}
 	if item.SourceURL != "" {
-		lines = append(lines, "    IMP page: "+item.SourceURL)
+		lines = append(lines, styleReportKV("IMP page", item.SourceURL))
 	}
 	if item.ImageURL != "" {
-		lines = append(lines, "    Image:    "+item.ImageURL)
+		lines = append(lines, styleReportKV("Image", item.ImageURL))
 	}
 	if item.MatchReason != "" {
-		lines = append(lines, "    Match:    "+item.MatchReason)
+		lines = append(lines, styleReportKV("Match", item.MatchReason))
 	}
 	if item.Error != "" {
-		lines = append(lines, "    Error:    "+item.Error)
+		lines = append(lines, styleReportKV("Error", item.Error))
 	} else if item.Message != "" && item.SourceURL == "" && item.ImageURL == "" {
-		lines = append(lines, "    Note:     "+item.Message)
+		lines = append(lines, styleReportKV("Note", item.Message))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1282,7 +1433,7 @@ func recentActivityView(lines []string, limit int) string {
 	if recent == "" {
 		return ""
 	}
-	return indentBlock(recent, "  ")
+	return indentBlock(strings.Join(styleRecentActivityLines(strings.Split(recent, "\n")), "\n"), "  ")
 }
 
 func runningActivityView(lines []string, limit, width int) string {
@@ -1300,7 +1451,7 @@ func runningActivityLines(lines []string, limit, width int) []string {
 	for _, line := range lines {
 		formatted = append(formatted, formatActivityEntry(line, width)...)
 	}
-	return formatted
+	return styleRecentActivityLines(formatted)
 }
 
 func formatActivityEntry(line string, width int) []string {
@@ -1311,22 +1462,97 @@ func formatActivityEntry(line string, width int) []string {
 	if strings.HasPrefix(line, "dry-run ") {
 		return formatDryRunActivity(line, width)
 	}
+	if strings.HasPrefix(line, "wiki-fallback ") {
+		return formatWikiFallbackActivity(line, width)
+	}
+	if strings.HasPrefix(line, "updated ") && strings.Contains(line, " | ") {
+		return formatUpdatedActivity(line, width)
+	}
+	if strings.HasPrefix(line, "ambiguous ") || strings.HasPrefix(line, "skip ") || strings.HasPrefix(line, "skip-updated ") || strings.HasPrefix(line, "skip-no-imp ") {
+		return formatSkipActivity(line, width)
+	}
 	prefix := "  • "
+	marker := ui.muted.Render("•")
 	if strings.HasPrefix(line, "updated ") {
 		prefix = "  ✓ "
-	} else if strings.HasPrefix(line, "skip ") {
-		prefix = "  – "
+		marker = ui.good.Render("✓")
 	} else if strings.HasPrefix(line, "report") {
 		prefix = "  ↳ "
+		marker = ui.accent2.Render("↳")
 	}
-	return wrapWithPrefix(line, prefix, "    ", width)
+	lines := wrapWithPrefix(strings.TrimPrefix(line, strings.TrimSpace(prefix)), prefix, "    ", width)
+	for i, l := range lines {
+		if strings.HasPrefix(l, prefix) {
+			lines[i] = strings.Replace(l, strings.TrimSpace(prefix), marker, 1)
+		}
+	}
+	return lines
+}
+
+func formatUpdatedActivity(line string, width int) []string {
+	parts := strings.Split(line, " | ")
+	main := strings.TrimPrefix(parts[0], "updated ")
+	lines := wrapWithPrefix(main, "  ✓ ", "    ", width)
+	for _, part := range parts[1:] {
+		label := "    Info:  "
+		value := part
+		if v, ok := strings.CutPrefix(part, "match: "); ok {
+			label, value = "    Match: ", v
+		}
+		lines = append(lines, wrapWithPrefix(value, label, strings.Repeat(" ", lipgloss.Width(label)), width)...)
+	}
+	return lines
+}
+
+func formatWikiFallbackActivity(line string, width int) []string {
+	parts := strings.Split(line, " | ")
+	main := strings.TrimPrefix(parts[0], "wiki-fallback ")
+	lines := wrapWithPrefix(main, "  ↯ WIKI ", "    ", width)
+	for _, part := range parts[1:] {
+		label := "    Info:  "
+		value := part
+		if v, ok := strings.CutPrefix(part, "image: "); ok {
+			label, value = "    Image: ", v
+		} else if v, ok := strings.CutPrefix(part, "reason: "); ok {
+			label, value = "    Reason: ", v
+		}
+		lines = append(lines, wrapWithPrefix(value, label, strings.Repeat(" ", lipgloss.Width(label)), width)...)
+	}
+	return lines
+}
+
+func formatSkipActivity(line string, width int) []string {
+	line = strings.TrimSpace(line)
+	label := "SKIP"
+	main := strings.TrimPrefix(line, "skip ")
+	if strings.HasPrefix(line, "ambiguous ") {
+		label = "AMBIGUOUS"
+		main = strings.TrimPrefix(line, "ambiguous ")
+	} else if strings.HasPrefix(line, "skip-updated ") {
+		label = "UPDATED"
+		main = strings.TrimPrefix(line, "skip-updated ")
+	} else if strings.HasPrefix(line, "skip-no-imp ") {
+		label = "SKIP"
+		main = strings.TrimPrefix(line, "skip-no-imp ")
+	}
+	title := main
+	reason := ""
+	if left, right, ok := splitMovieLogPayload(main); ok {
+		title = left
+		reason = right
+	}
+	lines := wrapWithPrefix(title, "  – "+label+" ", "    ", width)
+	if reason != "" {
+		lines = append(lines, wrapWithPrefix(reason, "    Reason: ", "            ", width)...)
+	}
+	return lines
 }
 
 func formatDryRunActivity(line string, width int) []string {
 	parts := strings.Split(line, " | ")
 	lines := []string{}
 	main := strings.TrimPrefix(parts[0], "dry-run ")
-	if title, source, ok := strings.Cut(main, ": "); ok {
+	if title, source, ok := splitMovieLogPayload(main); ok {
 		lines = append(lines, wrapWithPrefix(title, "  ○ DRY-RUN ", "    ", width)...)
 		lines = append(lines, wrapWithPrefix(source, "    IMP:   ", "           ", width)...)
 	} else {
@@ -1343,6 +1569,272 @@ func formatDryRunActivity(line string, width int) []string {
 		lines = append(lines, wrapWithPrefix(value, label, strings.Repeat(" ", lipgloss.Width(label)), width)...)
 	}
 	return lines
+}
+
+func splitMovieLogPayload(line string) (string, string, bool) {
+	if left, right, ok := strings.Cut(line, "): "); ok {
+		return left + ")", right, true
+	}
+	return strings.Cut(line, ": ")
+}
+
+func styleBindingLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if left, sep, right, ok := splitLabelLine(line); ok {
+		return ui.headerLabel.Render(left) + sep + ui.footer.Render(right)
+	}
+	if left, sep, right, ok := splitColonLine(line); ok {
+		return ui.headerLabel.Render(left+sep) + ui.footer.Render(right)
+	}
+	return ui.footer.Render(line)
+}
+
+func styleChoiceList(rendered string, cursor int) string {
+	lines := strings.Split(rendered, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "› ") {
+			lines[i] = ui.selected.Render(line)
+			continue
+		}
+		if i == cursor && strings.TrimSpace(line) != "" {
+			lines[i] = ui.selected.Render(line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func styleMovieList(rendered string, cursor int, chosen map[string]bool) string {
+	lines := strings.Split(rendered, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "…") {
+			continue
+		}
+		if strings.HasPrefix(line, "› ") {
+			lines[i] = styleMovieRow(line, chosen)
+			continue
+		}
+		lines[i] = styleMovieRow(line, chosen)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func styleMovieRow(line string, chosen map[string]bool) string {
+	indent := leadingWhitespace(line)
+	core := strings.TrimLeft(line, " ")
+	if core == "" {
+		return line
+	}
+	selected := strings.HasPrefix(core, "› ")
+	if selected {
+		core = strings.TrimPrefix(core, "› ")
+	}
+	markStyle := ui.footer
+	if strings.Contains(core, "[x]") {
+		markStyle = ui.good
+	}
+	core = strings.Replace(core, "[x]", markStyle.Render("[x]"), 1)
+	core = strings.Replace(core, "[ ]", ui.dim.Render("[ ]"), 1)
+	if selected {
+		core = ui.selected.Render(ui.accent.Render("›") + " " + core)
+	}
+	return indent + core
+}
+
+func styleToggleLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	label, sep, rest, ok := splitColonLine(line)
+	if !ok {
+		return styleBindingLine(line)
+	}
+	state, gap, hint, ok := splitLabelLine(rest)
+	if !ok {
+		return ui.headerLabel.Render(label+sep) + ui.panelValue.Render(rest)
+	}
+	stateStyle := ui.muted
+	if state == "on" {
+		stateStyle = ui.good
+	} else if state == "off" {
+		stateStyle = ui.bad
+	}
+	return ui.headerLabel.Render(label+sep) + stateStyle.Render(state) + gap + ui.footer.Render(hint)
+}
+
+func styleSummaryBlock(block string) string {
+	if block == "" {
+		return ""
+	}
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		lines[i] = styleKeyValueLine(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func stylePathLine(prefix, value string) string {
+	return ui.headerLabel.Render(prefix) + ui.code.Render(value)
+}
+
+func styleReportStatus(status string) string {
+	style := ui.accent
+	switch status {
+	case "UPDATED":
+		style = ui.good
+	case "DRY-RUN":
+		style = ui.warn
+	case "WIKI-FALLBACK":
+		status = "WIKI"
+		style = ui.wiki
+	case "NO-IMP":
+		status = "SKIPPED"
+		style = ui.skip
+	case "SKIPPED":
+		style = ui.skip
+	case "AMBIGUOUS":
+		style = ui.accent2
+	case "FAILED":
+		style = ui.bad
+	case "RESULT":
+		style = ui.accent
+	}
+	return style.Render(status)
+}
+
+func styleReportKV(label, value string) string {
+	return "    " + ui.headerLabel.Render(label+":") + " " + ui.panelValue.Render(value)
+}
+
+func styleKeyValueLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if label, sep, value, ok := splitColonLine(line); ok {
+		return ui.headerLabel.Render(label+sep) + ui.panelValue.Render(value)
+	}
+	if label, sep, value, ok := splitLabelLine(line); ok {
+		return ui.headerLabel.Render(label) + sep + ui.panelValue.Render(value)
+	}
+	return ui.panelValue.Render(line)
+}
+
+func styleRecentActivityLines(lines []string) []string {
+	styled := make([]string, 0, len(lines))
+	for _, line := range lines {
+		styled = append(styled, styleActivityLine(line))
+	}
+	return styled
+}
+
+func styleActivityLine(line string) string {
+	indent := leadingWhitespace(line)
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if strings.HasPrefix(line, "updated ") {
+		return indent + ui.good.Render("✓") + " " + ui.panelValue.Render(line)
+	}
+	if strings.HasPrefix(line, "wiki-fallback ") {
+		return indent + ui.wiki.Render("↯ WIKI") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "wiki-fallback "))
+	}
+	if strings.HasPrefix(line, "ambiguous ") {
+		return indent + ui.accent2.Render("– AMBIGUOUS") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "ambiguous "))
+	}
+	if strings.HasPrefix(line, "↯ WIKI ") {
+		return indent + ui.wiki.Render("↯ WIKI") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "↯ WIKI "))
+	}
+	if strings.HasPrefix(line, "skip ") {
+		return indent + ui.skip.Render("–") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "skip "))
+	}
+	if strings.HasPrefix(line, "skip-updated ") {
+		return indent + ui.skip.Render("– UPDATED") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "skip-updated "))
+	}
+	if strings.HasPrefix(line, "skip-no-imp ") {
+		return indent + ui.skip.Render("– SKIP") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "skip-no-imp "))
+	}
+	if strings.HasPrefix(line, "– AMBIGUOUS ") {
+		return indent + ui.accent2.Render("– AMBIGUOUS") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "– AMBIGUOUS "))
+	}
+	if strings.HasPrefix(line, "– SKIP ") {
+		return indent + ui.skip.Render("– SKIP") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "– SKIP "))
+	}
+	if strings.HasPrefix(line, "– UPDATED ") {
+		return indent + ui.skip.Render("– UPDATED") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "– UPDATED "))
+	}
+	if strings.HasPrefix(line, "– NO IMP ") {
+		return indent + ui.skip.Render("– SKIP") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "– NO IMP "))
+	}
+	if strings.HasPrefix(line, "report") {
+		return indent + ui.accent2.Render("↳") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "report"))
+	}
+	if strings.HasPrefix(line, "○ DRY-RUN ") {
+		return indent + ui.warn.Render("○ DRY-RUN") + " " + ui.panelValue.Render(strings.TrimPrefix(line, "○ DRY-RUN "))
+	}
+	if strings.HasPrefix(line, "IMP:") {
+		if _, value, ok := strings.Cut(line, ": "); ok {
+			return indent + ui.headerLabel.Render("IMP:") + " " + ui.code.Render(value)
+		}
+	}
+	if strings.HasPrefix(line, "Image:") {
+		if _, value, ok := strings.Cut(line, ": "); ok {
+			return indent + ui.headerLabel.Render("Image:") + " " + ui.code.Render(value)
+		}
+	}
+	if strings.HasPrefix(line, "Match:") {
+		if _, value, ok := strings.Cut(line, ": "); ok {
+			return indent + ui.headerLabel.Render("Match:") + " " + ui.panelValue.Render(value)
+		}
+	}
+	if strings.HasPrefix(line, "Reason:") {
+		if _, value, ok := strings.Cut(line, ": "); ok {
+			return indent + ui.headerLabel.Render("Reason:") + " " + ui.panelValue.Render(value)
+		}
+	}
+	if strings.HasPrefix(line, "Error:") {
+		if _, value, ok := strings.Cut(line, ": "); ok {
+			return indent + ui.headerLabel.Render("Error:") + " " + ui.bad.Render(value)
+		}
+	}
+	if strings.HasPrefix(line, "Note:") {
+		if _, value, ok := strings.Cut(line, ": "); ok {
+			return indent + ui.headerLabel.Render("Note:") + " " + ui.footer.Render(value)
+		}
+	}
+	return indent + ui.muted.Render(line)
+}
+
+func splitColonLine(line string) (string, string, string, bool) {
+	idx := strings.IndexByte(line, ':')
+	if idx < 0 {
+		return "", "", "", false
+	}
+	end := idx + 1
+	for end < len(line) && line[end] == ' ' {
+		end++
+	}
+	return line[:idx], line[idx:end], line[end:], true
+}
+
+func splitLabelLine(line string) (string, string, string, bool) {
+	idx := strings.IndexByte(line, ' ')
+	if idx < 0 {
+		return "", "", "", false
+	}
+	end := idx
+	for end < len(line) && line[end] == ' ' {
+		end++
+	}
+	if end == idx {
+		return "", "", "", false
+	}
+	return line[:idx], line[idx:end], line[end:], true
 }
 
 func wrapWithPrefix(text, firstPrefix, nextPrefix string, width int) []string {
@@ -1455,7 +1947,7 @@ func runningRows(height, width int, header string) int {
 		return 8
 	}
 	headerRows := len(strings.Split(wrapBody(header, width), "\n"))
-	return max(1, height-8-headerRows-2)
+	return max(0, height-8-headerRows-2)
 }
 
 func doneRows(height int) int {
@@ -1490,6 +1982,13 @@ func dryRunLine(dryRun bool) string {
 	return "Dry run: off (d toggles)"
 }
 
+func wikiFallbackLine(enabled bool) string {
+	if enabled {
+		return "Wikipedia fallback: on (w toggles)"
+	}
+	return "Wikipedia fallback: off (w toggles)"
+}
+
 func loadMovies(ctx context.Context, opID int, client Plex, server plex.Server, library plex.Library) tea.Cmd {
 	return func() tea.Msg {
 		movies, err := client.ListMovies(ctx, server, library)
@@ -1500,9 +1999,20 @@ func loadMovies(ctx context.Context, opID int, client Plex, server plex.Server, 
 func formatUpdateError(movie plex.Movie, err error) string {
 	var ambiguous *posterfinder.AmbiguousMatchError
 	if errors.As(err, &ambiguous) {
-		return fmt.Sprintf("skip %s (%d): %s", movie.Title, movie.Year, ambiguous.Summary())
+		return fmt.Sprintf("ambiguous %s (%d): %s", movie.Title, movie.Year, ambiguous.Summary())
+	}
+	if isNoIMPPosterError(err) {
+		return fmt.Sprintf("skip %s (%d): no IMP poster available", movie.Title, movie.Year)
 	}
 	return fmt.Sprintf("skip %s (%d): %v", movie.Title, movie.Year, err)
+}
+
+func isNoIMPPosterError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no IMP Awards poster found") || strings.Contains(msg, "no IMP candidate image could be visually compared") || strings.Contains(msg, "no poster candidates")
 }
 
 func formatAmbiguousDetails(movie plex.Movie, err *posterfinder.AmbiguousMatchError) []string {
@@ -1524,10 +2034,27 @@ func formatAmbiguousDetails(movie plex.Movie, err *posterfinder.AmbiguousMatchEr
 	return lines
 }
 
-func updateMovie(ctx context.Context, opID int, store *config.Store, client Plex, finder PosterFinder, server plex.Server, movie plex.Movie, dryRun bool) tea.Cmd {
+func updateMovie(ctx context.Context, opID int, store *config.Store, client Plex, finder PosterFinder, server plex.Server, movie plex.Movie, dryRun bool, wikiFallback bool) tea.Cmd {
 	return func() tea.Msg {
 		candidate, err := finder.FindTheatricalPoster(ctx, movie)
 		if err != nil {
+			var ambiguous *posterfinder.AmbiguousMatchError
+			if wikiFallback && (errors.As(err, &ambiguous) || isNoIMPPosterError(err)) {
+				fallback, fallbackErr := finder.FindWikipediaPoster(ctx, movie)
+				if fallbackErr != nil {
+					return updateOneMsg{opID: opID, movie: movie, err: fallbackErr}
+				}
+				if dryRun {
+					return updateOneMsg{opID: opID, movie: movie, line: wikiFallbackResultLine(movie, fallback), sourceURL: fallback.SourceURL, imageURL: fallback.ImageURL, matchReason: fallback.MatchReason}
+				}
+				if err := client.UploadPoster(ctx, server, movie, "poster.jpg", fallback.Bytes, fallback.ImageURL); err != nil {
+					return updateOneMsg{opID: opID, movie: movie, err: err}
+				}
+				if err := store.MarkPosterUpdated(config.PosterItem{RatingKey: movie.RatingKey, Title: movie.Title, Year: movie.Year, SourceURL: fallback.SourceURL}); err != nil {
+					return updateOneMsg{opID: opID, movie: movie, err: err}
+				}
+				return updateOneMsg{opID: opID, movie: movie, line: wikiFallbackResultLine(movie, fallback), sourceURL: fallback.SourceURL, imageURL: fallback.ImageURL, matchReason: fallback.MatchReason}
+			}
 			return updateOneMsg{opID: opID, movie: movie, err: err}
 		}
 		if dryRun {
@@ -1539,8 +2066,39 @@ func updateMovie(ctx context.Context, opID int, store *config.Store, client Plex
 		if err := store.MarkPosterUpdated(config.PosterItem{RatingKey: movie.RatingKey, Title: movie.Title, Year: movie.Year, SourceURL: candidate.SourceURL}); err != nil {
 			return updateOneMsg{opID: opID, movie: movie, err: err}
 		}
-		return updateOneMsg{opID: opID, movie: movie, line: fmt.Sprintf("updated %s (%d)", movie.Title, movie.Year), sourceURL: candidate.SourceURL, imageURL: candidate.ImageURL, matchReason: candidate.MatchReason}
+		return updateOneMsg{opID: opID, movie: movie, line: updatedResultLine(movie, candidate), sourceURL: candidate.SourceURL, imageURL: candidate.ImageURL, matchReason: candidate.MatchReason}
 	}
+}
+
+func updatedResultLine(movie plex.Movie, candidate posterfinder.Candidate) string {
+	line := fmt.Sprintf("updated %s (%d)", movie.Title, movie.Year)
+	if match := visualMatchSummary(candidate.MatchReason); match != "" {
+		line += ", " + match
+	}
+	return line
+}
+
+func visualMatchSummary(reason string) string {
+	idx := strings.Index(reason, "visual match ")
+	if idx < 0 {
+		return ""
+	}
+	rest := reason[idx:]
+	if end := strings.Index(rest, ";"); end >= 0 {
+		rest = rest[:end]
+	}
+	return strings.TrimSpace(rest)
+}
+
+func wikiFallbackResultLine(movie plex.Movie, candidate posterfinder.Candidate) string {
+	line := fmt.Sprintf("wiki-fallback %s (%d): %s", movie.Title, movie.Year, candidate.SourceURL)
+	if candidate.ImageURL != "" && candidate.ImageURL != candidate.SourceURL {
+		line += " | image: " + candidate.ImageURL
+	}
+	if candidate.MatchReason != "" {
+		line += " | reason: " + candidate.MatchReason
+	}
+	return line
 }
 
 func dryRunResultLine(movie plex.Movie, candidate posterfinder.Candidate) string {
@@ -1596,6 +2154,10 @@ func maxVisibleLineWidth(text string) int {
 		maxWidth = max(maxWidth, lipgloss.Width(line))
 	}
 	return maxWidth
+}
+
+func renderedLineCount(view string) int {
+	return len(strings.Split(stripANSI(view), "\n"))
 }
 
 func centerView(view string, width, height int) string {
@@ -1685,8 +2247,21 @@ func renderMovies(movies []plex.Movie, cursor int, chosen map[string]bool, maxRo
 		maxRows = len(movies)
 	}
 	selected := min(max(0, cursor), len(movies)-1)
-	if len(movies) <= maxRows || maxRows < 3 {
+	if len(movies) <= maxRows {
 		return renderMovieRows(movies, 0, len(movies), selected, chosen)
+	}
+	if maxRows < 3 {
+		row := renderMovieRows(movies, selected, selected+1, selected, chosen)
+		if maxRows == 1 {
+			return row
+		}
+		marker := ""
+		if selected < len(movies)-1 {
+			marker = fmt.Sprintf("… %d more", len(movies)-selected-1)
+		} else if selected > 0 {
+			marker = fmt.Sprintf("… %d earlier", selected)
+		}
+		return row + "\n" + marker
 	}
 	contentRows := maxRows - 2
 	start := selected - contentRows/2
@@ -1729,7 +2304,7 @@ func movieListRows(height int) int {
 	if height <= 0 {
 		return 12
 	}
-	return max(3, height-13)
+	return max(1, height-13)
 }
 
 func tail(lines []string, n int) string {
