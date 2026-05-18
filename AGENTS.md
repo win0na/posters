@@ -2,38 +2,39 @@
 
 ## purpose
 
-this file defines repo-wide defaults for human and ai contributors.
+repo-wide defaults for human and ai contributors.
 
-keep this file compact. it should contain only durable, repo-wide rules. put setup, install, and run commands in `README.md`. put deeper llm-facing reference material in `llm/`.
+keep this file compact. put setup, install, and run commands in `README.md`. put deeper llm-facing reference material in `llm/` when needed.
 
 ## project overview
 
-this repository contains **posters**, a Go TUI for updating Plex movie library posters to original theatrical posters.
+this repository contains **posters**, a Go Bubble Tea TUI for updating Plex movie library posters to original theatrical posters.
 
-core goals:
-- authenticate with Plex without environment variables or API keys
-- store Plex credentials under `~/.config/posters`
-- list Plex libraries and default update mode to all posters
-- source poster candidates exclusively from `impawards.com`
-- cross-reference IMP Awards candidates with the movie's Wikipedia main poster
-- save completion metadata locally under `~/.config/posters`
-- provide clear Bubble Tea progress feedback for auth, selection, matching, and updates
+current program state:
+- authenticates through Plex PIN login; no environment variables or user API keys
+- stores Plex token, stable client id, and last server/library under `~/.config/posters/state.json`
+- stores local poster-update completion metadata under `~/.config/posters/metadata.json`
+- writes JSON and CSV run reports under `~/.config/posters/reports/`
+- defaults to updating all eligible movie posters; specific-poster mode remains available
+- supports dry-run, force refresh, status view, cancellation, and explicit Wikipedia fallback mode
+- discovers primary poster candidates from IMP Awards
+- uses Plex `OriginalTitle` before broad IMP search fallback when exact title probes fail
+- uses Wikipedia infobox posters to confirm likely theatrical IMP candidates through visual matching
+- skips ambiguous matches instead of silently guessing
 
 do not infer deep internals from this file alone. use:
 - `README.md` for setup, run, and verification commands
-- `llm/ARCHITECTURE.md` for subsystem map when present
 - nearest nested `AGENTS.md` for package-specific rules
 - source files for current behavior
 
 ## working principles
 
-these rules keep changes small, grounded, and easy to verify.
-
 - prefer small, focused changes over broad rewrites
-- keep Plex API, poster sourcing, matching, and TUI responsibilities separated
-- design TUI flows as explicit Bubble Tea state machines
+- keep Plex API, poster sourcing/matching, persistence, and TUI responsibilities separated
+- model TUI flows as explicit Bubble Tea state machines
 - keep long-running work asynchronous; never block Bubble Tea `Update`
-- show progress or spinner for any network-bound operation
+- show progress or spinner for network-bound operations
+- preserve cancellation/error states for auth, loading, matching, and updates
 - ask before changing data persistence, Plex metadata strategy, or poster matching policy
 - if instructions conflict, prefer:
   1. direct user instructions
@@ -42,48 +43,34 @@ these rules keep changes small, grounded, and easy to verify.
 
 ## implementation invariants
 
-these are repo-wide facts worth preserving unless the user explicitly changes them.
-
 - no environment variables or user-provided API keys are required
 - runtime credentials live under `~/.config/posters`
 - local storage is the source of truth for poster-update completion state
 - poster-update completion state must not be embedded in the Plex item
-- IMP Awards is the exclusive poster source
-- Wikipedia is used only to identify/confirm the original theatrical poster
+- IMP Awards is the primary poster source
+- Wikipedia is used to identify/confirm the original theatrical poster and may be used as an explicit opt-in fallback source
+- Wikipedia fallback upload must remain off by default
 - default action is updating all eligible posters, not specific posters
 - network fetchers must identify ambiguous matches instead of silently guessing
 - UX must remain usable on narrow terminals and support cancellation/error states
 
-## token optimization
+## safety baseline
 
-this file is always-loaded minimum context.
-
-- keep only repo-wide, durable defaults here
-- do not put temporary plans or large file trees here
-- prefer exact file references over pasted excerpts
-- put detailed protocol notes in `llm/`
+- never commit secrets, credentials, Plex tokens, auth caches, `.env` files, private keys, or browser cookies
+- never log auth tokens or full credential payloads
+- never scrape or download poster assets from sources other than IMP Awards, except Wikipedia images used for confirmation/fallback
+- respect rate limits; preserve centralized polite throttling and local cache behavior
+- if a required check cannot be run, say why
+- never use destructive git operations unless explicitly requested
 
 ## agent efficiency rules
-
-use smallest context that still allows correct work.
 
 - read only files needed for current task
 - prefer targeted searches over broad repository dumps
 - summarize findings before large changes
 - preserve package boundaries when editing
 - add nested `AGENTS.md` files when a directory gains durable local rules
-- update docs when commands, config paths, or workflows change
-
-## safety baseline
-
-these constraints apply across repository.
-
-- never commit secrets, credentials, Plex tokens, auth caches, `.env` files, private keys, or browser cookies
-- never log auth tokens or full credential payloads
-- never scrape or download from sources other than IMP Awards for poster assets
-- respect rate limits and add polite throttling for web requests
-- if a required check cannot be run, say so explicitly
-- never use destructive git operations unless explicitly requested
+- update docs when commands, config paths, reports, keybindings, or workflows change
 
 ## git conventions
 
@@ -102,8 +89,9 @@ use this format for short commits:
 
 examples:
 - `tui(auth): add plex login screen`
-- `plex(metadata): embed poster completion marker`
+- `plex(metadata): store original titles`
 - `posters(impawards): match theatrical candidates`
+- `docs(readme): refresh usage guide`
 
 for larger commits, use the same first line, followed by short bullets and a final reasoning paragraph.
 
