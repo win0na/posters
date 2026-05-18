@@ -104,7 +104,7 @@ func TestListMoviesPaginates(t *testing.T) {
 		start, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Start"))
 		movies := []map[string]any{}
 		for i := start; i < start+moviePageSize && i < 205; i++ {
-			movies = append(movies, map[string]any{"ratingKey": strconv.Itoa(i), "title": "Movie " + strconv.Itoa(i), "year": 2000 + i%20, "guid": "guid-" + strconv.Itoa(i)})
+			movies = append(movies, map[string]any{"ratingKey": strconv.Itoa(i), "title": "Movie " + strconv.Itoa(i), "originalTitle": "Original " + strconv.Itoa(i), "year": 2000 + i%20, "guid": "guid-" + strconv.Itoa(i)})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"MediaContainer": map[string]any{"totalSize": 205, "Metadata": movies}})
 	}))
@@ -124,6 +124,9 @@ func TestListMoviesPaginates(t *testing.T) {
 	}
 	if movies[204].RatingKey != "204" {
 		t.Fatalf("last movie = %#v", movies[204])
+	}
+	if movies[204].OriginalTitle != "Original 204" {
+		t.Fatalf("last movie original title = %q", movies[204].OriginalTitle)
 	}
 }
 

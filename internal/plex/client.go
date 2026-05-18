@@ -74,10 +74,11 @@ type Library struct {
 }
 
 type Movie struct {
-	RatingKey string
-	Title     string
-	Year      int
-	GUID      string
+	RatingKey     string
+	Title         string
+	OriginalTitle string
+	Year          int
+	GUID          string
 }
 
 func NewClient(store *config.Store) *Client {
@@ -224,10 +225,11 @@ func (c *Client) listMoviePage(ctx context.Context, server Server, library Libra
 			Size      int `json:"size"`
 			TotalSize int `json:"totalSize"`
 			Metadata  []struct {
-				RatingKey string `json:"ratingKey"`
-				Title     string `json:"title"`
-				Year      int    `json:"year"`
-				GUID      string `json:"guid"`
+				RatingKey     string `json:"ratingKey"`
+				Title         string `json:"title"`
+				OriginalTitle string `json:"originalTitle"`
+				Year          int    `json:"year"`
+				GUID          string `json:"guid"`
 			} `json:"Metadata"`
 		} `json:"MediaContainer"`
 	}
@@ -241,7 +243,7 @@ func (c *Client) listMoviePage(ctx context.Context, server Server, library Libra
 	}
 	movies := make([]Movie, 0, len(out.MediaContainer.Metadata))
 	for _, item := range out.MediaContainer.Metadata {
-		movies = append(movies, Movie{RatingKey: item.RatingKey, Title: item.Title, Year: item.Year, GUID: item.GUID})
+		movies = append(movies, Movie{RatingKey: item.RatingKey, Title: item.Title, OriginalTitle: item.OriginalTitle, Year: item.Year, GUID: item.GUID})
 	}
 	total := out.MediaContainer.TotalSize
 	if total == 0 {
