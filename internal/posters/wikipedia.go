@@ -60,69 +60,35 @@ func (s *Service) wikipediaPageTitle(ctx context.Context, movie plex.Movie) (str
 		fmt.Sprintf("%s film", movie.Title),
 		movie.Title,
 	}
-	type searchResult struct {
-		title string
-		err   error
-	}
-	ch := make(chan searchResult, len(queries))
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
+	// Run queries sequentially in order of specificity so the most
+	// targeted query ("Title Year film") always has first chance to
+	// find a result. Concurrent goroutines create a race where a
+	// less-specific query (e.g. "Hellraiser film") can return a
+	// wrong-period film page (e.g. "Hellraiser (2022 film)") before
+	// the year-qualified query resolves.
 	for _, query := range queries {
-		query := query
-		go func() {
-			values := url.Values{"action": {"query"}, "list": {"search"}, "format": {"json"}, "srlimit": {"5"}, "srsearch": {query}}
-			body, err := s.fetchText(ctx, wikipediaAPI+"?"+values.Encode())
-			if err != nil {
-				select {
-				case ch <- searchResult{err: err}:
-				case <-ctx.Done():
-				}
-				return
-			}
-			var response struct {
-				Query struct {
-					Search []struct {
-						Title   string `json:"title"`
-						Snippet string `json:"snippet"`
-					} `json:"search"`
-				} `json:"query"`
-			}
-			if err := json.Unmarshal([]byte(body), &response); err != nil {
-				select {
-				case ch <- searchResult{err: err}:
-				case <-ctx.Done():
-				}
-				return
-			}
-			results := make([]wikipediaSearchResult, 0, len(response.Query.Search))
-			for _, result := range response.Query.Search {
-				results = append(results, wikipediaSearchResult{Title: result.Title, Snippet: result.Snippet})
-			}
-			if title := chooseWikipediaSearchResult(movie, results); title != "" {
-				select {
-				case ch <- searchResult{title: title}:
-				case <-ctx.Done():
-				}
-				return
-			}
-			select {
-			case ch <- searchResult{err: fmt.Errorf("no match for query: %s", query)}:
-			case <-ctx.Done():
-			}
-		}()
-	}
-
-	remaining := len(queries)
-	for remaining > 0 {
-		select {
-		case res := <-ch:
-			if res.title != "" {
-				return res.title, nil
-			}
-			remaining--
-		case <-ctx.Done():
-			return "", ctx.Err()
+		values := url.Values{"action": {"query"}, "list": {"search"}, "format": {"json"}, "srlimit": {"5"}, "srsearch": {query}}
+		body, err := s.fetchText(ctx, wikipediaAPI+"?"+values.Encode())
+		if err != nil {
+			continue
+		}
+		var response struct {
+			Query struct {
+				Search []struct {
+					Title   string `json:"title"`
+					Snippet string `json:"snippet"`
+				} `json:"search"`
+			} `json:"query"`
+		}
+		if err := json.Unmarshal([]byte(body), &response); err != nil {
+			continue
+		}
+		results := make([]wikipediaSearchResult, 0, len(response.Query.Search))
+		for _, result := range response.Query.Search {
+			results = append(results, wikipediaSearchResult{Title: result.Title, Snippet: result.Snippet})
+		}
+		if title := chooseWikipediaSearchResult(movie, results); title != "" {
+			return title, nil
 		}
 	}
 	// Fallback: try direct REST API lookups for common Wikipedia titles.
