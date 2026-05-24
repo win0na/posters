@@ -1,4 +1,4 @@
-package plex
+package tests
 
 import (
 	"context"
@@ -12,10 +12,13 @@ import (
 	"testing"
 
 	"github.com/win0na/posters/internal/config"
+	"github.com/win0na/posters/internal/plex"
 )
 
-func TestUploadPosterMultipart(t *testing.T) {
-	store := testStore(t)
+const plexMoviePageSize = 100
+
+func TestPlexUploadPosterMultipart(t *testing.T) {
+	store := plexTestStore(t)
 	var gotPath, gotToken, gotContentType string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -29,8 +32,8 @@ func TestUploadPosterMultipart(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(store)
-	err := client.UploadPoster(context.Background(), Server{URI: server.URL}, Movie{RatingKey: "123"}, "poster.jpg", []byte("poster-data"), "")
+	client := plex.NewClient(store)
+	err := client.UploadPoster(context.Background(), plex.Server{URI: server.URL}, plex.Movie{RatingKey: "123"}, "poster.jpg", []byte("poster-data"), "")
 	if err != nil {
 		t.Fatalf("UploadPoster() error = %v", err)
 	}
@@ -45,8 +48,8 @@ func TestUploadPosterMultipart(t *testing.T) {
 	}
 }
 
-func TestUploadPosterFallsBackToSourceURL(t *testing.T) {
-	store := testStore(t)
+func TestPlexUploadPosterFallsBackToSourceURL(t *testing.T) {
+	store := plexTestStore(t)
 	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.String())
@@ -61,8 +64,8 @@ func TestUploadPosterFallsBackToSourceURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(store)
-	err := client.UploadPoster(context.Background(), Server{URI: server.URL}, Movie{RatingKey: "456"}, "poster.jpg", []byte("poster-data"), "http://www.impawards.com/1979/posters/alien.jpg")
+	client := plex.NewClient(store)
+	err := client.UploadPoster(context.Background(), plex.Server{URI: server.URL}, plex.Movie{RatingKey: "456"}, "poster.jpg", []byte("poster-data"), "http://www.impawards.com/1979/posters/alien.jpg")
 	if err != nil {
 		t.Fatalf("UploadPoster() error = %v", err)
 	}
@@ -76,15 +79,15 @@ func TestUploadPosterFallsBackToSourceURL(t *testing.T) {
 	}
 }
 
-func TestUploadPosterFailureGivesSmokeTestGuidance(t *testing.T) {
-	store := testStore(t)
+func TestPlexUploadPosterFailureGivesSmokeTestGuidance(t *testing.T) {
+	store := plexTestStore(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsupported", http.StatusUnsupportedMediaType)
 	}))
 	defer server.Close()
 
-	client := NewClient(store)
-	err := client.UploadPoster(context.Background(), Server{URI: server.URL}, Movie{RatingKey: "789"}, "poster.jpg", []byte("poster-data"), "http://www.impawards.com/1979/posters/alien.jpg")
+	client := plex.NewClient(store)
+	err := client.UploadPoster(context.Background(), plex.Server{URI: server.URL}, plex.Movie{RatingKey: "789"}, "poster.jpg", []byte("poster-data"), "http://www.impawards.com/1979/posters/alien.jpg")
 	if err == nil {
 		t.Fatal("UploadPoster() err = nil")
 	}
@@ -96,22 +99,22 @@ func TestUploadPosterFailureGivesSmokeTestGuidance(t *testing.T) {
 	}
 }
 
-func TestListMoviesPaginates(t *testing.T) {
-	store := testStore(t)
+func TestPlexListMoviesPaginates(t *testing.T) {
+	store := plexTestStore(t)
 	starts := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		starts = append(starts, r.URL.Query().Get("X-Plex-Container-Start"))
 		start, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Start"))
 		movies := []map[string]any{}
-		for i := start; i < start+moviePageSize && i < 205; i++ {
+		for i := start; i < start+plexMoviePageSize && i < 205; i++ {
 			movies = append(movies, map[string]any{"ratingKey": strconv.Itoa(i), "title": "Movie " + strconv.Itoa(i), "originalTitle": "Original " + strconv.Itoa(i), "year": 2000 + i%20, "guid": "guid-" + strconv.Itoa(i)})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"MediaContainer": map[string]any{"totalSize": 205, "Metadata": movies}})
 	}))
 	defer server.Close()
 
-	client := NewClient(store)
-	movies, err := client.ListMovies(context.Background(), Server{URI: server.URL}, Library{Key: "1"})
+	client := plex.NewClient(store)
+	movies, err := client.ListMovies(context.Background(), plex.Server{URI: server.URL}, plex.Library{Key: "1"})
 	if err != nil {
 		t.Fatalf("ListMovies() error = %v", err)
 	}
@@ -130,24 +133,24 @@ func TestListMoviesPaginates(t *testing.T) {
 	}
 }
 
-func TestUnauthorizedHTTPError(t *testing.T) {
-	store := testStore(t)
+func TestPlexUnauthorizedHTTPError(t *testing.T) {
+	store := plexTestStore(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad token", http.StatusUnauthorized)
 	}))
 	defer server.Close()
 
-	client := NewClient(store)
-	_, err := client.ListMovies(context.Background(), Server{URI: server.URL}, Library{Key: "1"})
+	client := plex.NewClient(store)
+	_, err := client.ListMovies(context.Background(), plex.Server{URI: server.URL}, plex.Library{Key: "1"})
 	if err == nil {
 		t.Fatal("ListMovies() err = nil")
 	}
-	if !errors.Is(err, ErrUnauthorized) || !IsUnauthorized(err) {
+	if !errors.Is(err, plex.ErrUnauthorized) || !plex.IsUnauthorized(err) {
 		t.Fatalf("err = %v, want ErrUnauthorized", err)
 	}
 }
 
-func testStore(t *testing.T) *config.Store {
+func plexTestStore(t *testing.T) *config.Store {
 	t.Helper()
 	store, err := config.OpenDir(t.TempDir())
 	if err != nil {

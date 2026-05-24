@@ -17,6 +17,7 @@ rules for Plex.tv and Plex Media Server API integration code.
 
 - never log Plex tokens or full auth payloads.
 - keep Plex.tv auth separate from Plex Media Server calls.
+- keep Plex API integration modular if it grows; prefer files under 500 lines and split auth, discovery, and uploads by responsibility.
 - use a stable local `X-Plex-Client-Identifier` from `~/.config/posters`.
 - do not add environment-variable based auth paths.
 - keep unauthorized, expired, unavailable, and ambiguous server responses recoverable by the TUI.

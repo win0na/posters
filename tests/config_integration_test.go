@@ -1,16 +1,18 @@
-package config
+package tests
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/win0na/posters/internal/config"
 )
 
-func TestPosterUpdated(t *testing.T) {
+func TestConfigPosterUpdated(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenDir(t.TempDir())
+	store, err := config.OpenDir(t.TempDir())
 	if err != nil {
 		t.Fatalf("OpenDir() err = %v", err)
 	}
@@ -23,7 +25,7 @@ func TestPosterUpdated(t *testing.T) {
 		t.Fatal("PosterUpdated() = true before mark")
 	}
 
-	err = store.MarkPosterUpdated(PosterItem{RatingKey: "1", Title: "Alien", Year: 1979, SourceURL: "http://www.impawards.com/1979/alien.html"})
+	err = store.MarkPosterUpdated(config.PosterItem{RatingKey: "1", Title: "Alien", Year: 1979, SourceURL: "http://www.impawards.com/1979/alien.html"})
 	if err != nil {
 		t.Fatalf("MarkPosterUpdated() err = %v", err)
 	}
@@ -37,14 +39,61 @@ func TestPosterUpdated(t *testing.T) {
 	}
 }
 
-func TestClearPlexTokenPreservesClientID(t *testing.T) {
+func TestConfigBlacklistMovie(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenDir(t.TempDir())
+	store, err := config.OpenDir(t.TempDir())
 	if err != nil {
 		t.Fatalf("OpenDir() err = %v", err)
 	}
-	if err := store.SaveState(State{ClientID: "client-id", PlexToken: "token"}); err != nil {
+
+	blacklisted, err := store.MovieBlacklisted("1")
+	if err != nil {
+		t.Fatalf("MovieBlacklisted() err = %v", err)
+	}
+	if blacklisted {
+		t.Fatal("MovieBlacklisted() = true before mark")
+	}
+
+	if err := store.BlacklistMovie(config.BlacklistItem{RatingKey: "1", Title: "Alien", Year: 1979}); err != nil {
+		t.Fatalf("BlacklistMovie() err = %v", err)
+	}
+	blacklisted, err = store.MovieBlacklisted("1")
+	if err != nil {
+		t.Fatalf("MovieBlacklisted() err = %v", err)
+	}
+	if !blacklisted {
+		t.Fatal("MovieBlacklisted() = false after mark")
+	}
+
+	metadata, err := store.LoadMetadata()
+	if err != nil {
+		t.Fatalf("LoadMetadata() err = %v", err)
+	}
+	if metadata.Blacklist["1"].Title != "Alien" {
+		t.Fatalf("blacklist = %#v", metadata.Blacklist)
+	}
+
+	if err := store.UnblacklistMovie("1"); err != nil {
+		t.Fatalf("UnblacklistMovie() err = %v", err)
+	}
+	blacklisted, err = store.MovieBlacklisted("1")
+	if err != nil {
+		t.Fatalf("MovieBlacklisted() err = %v", err)
+	}
+	if blacklisted {
+		t.Fatal("MovieBlacklisted() = true after unblacklist")
+	}
+}
+
+func TestConfigClearPlexTokenPreservesClientID(t *testing.T) {
+	t.Parallel()
+
+	store, err := config.OpenDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenDir() err = %v", err)
+	}
+	if err := store.SaveState(config.State{ClientID: "client-id", PlexToken: "token"}); err != nil {
 		t.Fatalf("SaveState() err = %v", err)
 	}
 	if err := store.ClearPlexToken(); err != nil {
@@ -62,14 +111,14 @@ func TestClearPlexTokenPreservesClientID(t *testing.T) {
 	}
 }
 
-func TestSaveLastSelection(t *testing.T) {
+func TestConfigSaveLastSelection(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenDir(t.TempDir())
+	store, err := config.OpenDir(t.TempDir())
 	if err != nil {
 		t.Fatalf("OpenDir() err = %v", err)
 	}
-	if err := store.SaveState(State{ClientID: "client-id", PlexToken: "token"}); err != nil {
+	if err := store.SaveState(config.State{ClientID: "client-id", PlexToken: "token"}); err != nil {
 		t.Fatalf("SaveState() err = %v", err)
 	}
 	if err := store.SaveLastSelection("server-id", "NAS", "http://nas:32400", "7", "Movies"); err != nil {
@@ -84,16 +133,16 @@ func TestSaveLastSelection(t *testing.T) {
 	}
 }
 
-func TestSaveRunReport(t *testing.T) {
+func TestConfigSaveRunReport(t *testing.T) {
 	t.Parallel()
 
-	store, err := OpenDir(t.TempDir())
+	store, err := config.OpenDir(t.TempDir())
 	if err != nil {
 		t.Fatalf("OpenDir() err = %v", err)
 	}
-	jsonPath, csvPath, err := store.SaveRunReport(RunReport{
-		Stats: ReportStats{Updated: 1},
-		Items: []ReportItem{{RatingKey: "1", Title: "Alien", Year: 1979, Status: "updated", SourceURL: "http://www.impawards.com/1979/alien.html"}},
+	jsonPath, csvPath, err := store.SaveRunReport(config.RunReport{
+		Stats: config.ReportStats{Updated: 1},
+		Items: []config.ReportItem{{RatingKey: "1", Title: "Alien", Year: 1979, Status: "updated", SourceURL: "http://www.impawards.com/1979/alien.html"}},
 	})
 	if err != nil {
 		t.Fatalf("SaveRunReport() err = %v", err)

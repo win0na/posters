@@ -78,6 +78,7 @@ go run ./cmd/posters -version        # print version
 | `f` | toggle force refresh on mode/movie screens |
 | `w` | toggle Wikipedia fallback on mode/movie screens |
 | `s` | show status/config screen |
+| `b` | blacklist highlighted movie in specific mode; open/manage blacklist from mode/status screens |
 | `esc` | back or cancel in-flight auth/update work |
 | `r` | clear saved Plex login on login/error screens |
 | `q`, `ctrl+c` | quit |
@@ -113,6 +114,7 @@ Example progress row:
 
 - default mode updates all eligible movies
 - movies in local metadata are skipped unless force mode is on
+- blacklisted movies are skipped even when force mode is on
 - dry-run reports matches without upload or metadata writes
 - ambiguous matches are reported as `ambiguous`
 - missing IMP matches are reported as `skipped`
@@ -132,7 +134,7 @@ Important files:
 | path | purpose |
 |------|---------|
 | `state.json` | Plex token, local client id, last server/library |
-| `metadata.json` | local poster-update completion state |
+| `metadata.json` | local poster-update completion state and movie blacklist |
 | `reports/run-*.json` | run report with stats and per-movie details |
 | `reports/run-*.csv` | CSV copy of each run report |
 

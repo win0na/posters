@@ -38,7 +38,8 @@ type State struct {
 }
 
 type PosterMetadata struct {
-	Items map[string]PosterItem `json:"items"`
+	Items     map[string]PosterItem    `json:"items"`
+	Blacklist map[string]BlacklistItem `json:"blacklist,omitempty"`
 }
 
 type PosterItem struct {
@@ -46,6 +47,13 @@ type PosterItem struct {
 	Title     string    `json:"title"`
 	Year      int       `json:"year,omitempty"`
 	SourceURL string    `json:"source_url"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type BlacklistItem struct {
+	RatingKey string    `json:"rating_key"`
+	Title     string    `json:"title"`
+	Year      int       `json:"year,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -154,7 +162,7 @@ func (s *Store) LoadMetadata() (PosterMetadata, error) {
 }
 
 func (s *Store) loadMetadataUnlocked() (PosterMetadata, error) {
-	metadata := PosterMetadata{Items: map[string]PosterItem{}}
+	metadata := PosterMetadata{Items: map[string]PosterItem{}, Blacklist: map[string]BlacklistItem{}}
 	if err := readJSON(filepath.Join(s.dir, metadataFile), &metadata); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return metadata, nil
@@ -163,6 +171,9 @@ func (s *Store) loadMetadataUnlocked() (PosterMetadata, error) {
 	}
 	if metadata.Items == nil {
 		metadata.Items = map[string]PosterItem{}
+	}
+	if metadata.Blacklist == nil {
+		metadata.Blacklist = map[string]BlacklistItem{}
 	}
 	return metadata, nil
 }
@@ -187,6 +198,40 @@ func (s *Store) PosterUpdated(ratingKey string) (bool, error) {
 		return false, err
 	}
 	_, ok := metadata.Items[ratingKey]
+	return ok, nil
+}
+
+func (s *Store) BlacklistMovie(item BlacklistItem) error {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	metadata, err := s.loadMetadataUnlocked()
+	if err != nil {
+		return err
+	}
+	item.UpdatedAt = time.Now()
+	metadata.Blacklist[item.RatingKey] = item
+	return writeJSON(filepath.Join(s.dir, metadataFile), metadata, 0o600)
+}
+
+func (s *Store) UnblacklistMovie(ratingKey string) error {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	metadata, err := s.loadMetadataUnlocked()
+	if err != nil {
+		return err
+	}
+	delete(metadata.Blacklist, ratingKey)
+	return writeJSON(filepath.Join(s.dir, metadataFile), metadata, 0o600)
+}
+
+func (s *Store) MovieBlacklisted(ratingKey string) (bool, error) {
+	s.metadataMu.Lock()
+	defer s.metadataMu.Unlock()
+	metadata, err := s.loadMetadataUnlocked()
+	if err != nil {
+		return false, err
+	}
+	_, ok := metadata.Blacklist[ratingKey]
 	return ok, nil
 }
 
