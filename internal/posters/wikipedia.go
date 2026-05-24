@@ -125,6 +125,23 @@ func (s *Service) wikipediaPageTitle(ctx context.Context, movie plex.Movie) (str
 			return "", ctx.Err()
 		}
 	}
+	// Fallback: try direct REST API lookups for common Wikipedia titles.
+	// Catches cases where search fails (e.g., exact title is not a movie article
+	// but a disambiguation page, or the search result pool lacks the movie page).
+	for _, candidate := range []string{
+		movie.Title + " (film)",
+		fmt.Sprintf("%s (%d film)", movie.Title, movie.Year),
+	} {
+		pageURL := "https://en.wikipedia.org/api/rest_v1/page/html/" + url.PathEscape(candidate)
+		body, err := s.fetchText(ctx, pageURL)
+		if err != nil {
+			continue
+		}
+		poster := parseWikipediaPoster(candidate, body)
+		if poster.ImageURL != "" {
+			return candidate, nil
+		}
+	}
 	return "", fmt.Errorf("no wikipedia page found for %s (%d)", movie.Title, movie.Year)
 }
 
@@ -135,6 +152,8 @@ func chooseWikipediaSearchTitle(movie plex.Movie, titles []string) string {
 	}
 	return chooseWikipediaSearchResult(movie, results)
 }
+
+const minWikipediaSearchScore = 300
 
 func chooseWikipediaSearchResult(movie plex.Movie, results []wikipediaSearchResult) string {
 	if len(results) == 0 {
@@ -173,6 +192,9 @@ func chooseWikipediaSearchResult(movie plex.Movie, results []wikipediaSearchResu
 		if score > bestScore {
 			bestTitle, bestScore = title, score
 		}
+	}
+	if bestScore < minWikipediaSearchScore {
+		return ""
 	}
 	return bestTitle
 }
