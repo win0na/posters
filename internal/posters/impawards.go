@@ -25,14 +25,21 @@ func (s *Service) impCandidates(ctx context.Context, movie plex.Movie) ([]impCan
 	return nil, fmt.Errorf("no IMP Awards poster found for %s (%d)", movie.Title, movie.Year)
 }
 
-// probeYearsConcurrent probes all candidate years concurrently and returns
-// candidates from the first year that finds a match, cancelling remaining probes.
+// probeYearsConcurrent probes all candidate years concurrently.
+// It cancels remaining probes on first match but waits for all goroutines
+// to finish before returning, ensuring no background cache writes or
+// network requests outlive the call.
 func (s *Service) probeYearsConcurrent(ctx context.Context, movie plex.Movie, includeSearch bool) []impCandidate {
 	years := impCandidateYears(movie.Year)
 	if len(years) == 0 {
 		return nil
 	}
-	resultCh := make(chan []impCandidate, 1)
+
+	type yearResult struct {
+		candidates []impCandidate
+		year       int
+	}
+	resultCh := make(chan yearResult, len(years))
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -45,20 +52,28 @@ func (s *Service) probeYearsConcurrent(ctx context.Context, movie plex.Movie, in
 			candidates, err := s.impCandidatesForYear(ctx, movie, year, includeSearch)
 			if err == nil && len(candidates) > 0 {
 				select {
-				case resultCh <- candidates:
+				case resultCh <- yearResult{candidates: candidates, year: year}:
 				case <-ctx.Done():
 				}
 			}
 		}()
 	}
 
+	// Wait for all year goroutines to finish, then close results
 	go func() {
 		wg.Wait()
 		close(resultCh)
 	}()
 
-	for candidates := range resultCh {
-		return candidates
+	// Collect all results, prefer closest year
+	found := map[int][]impCandidate{}
+	for res := range resultCh {
+		found[res.year] = res.candidates
+	}
+	for _, year := range years {
+		if candidates, ok := found[year]; ok {
+			return candidates
+		}
 	}
 	return nil
 }
