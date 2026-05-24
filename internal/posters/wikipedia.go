@@ -140,6 +140,14 @@ func chooseWikipediaSearchResult(movie plex.Movie, results []wikipediaSearchResu
 		if strings.Contains(text, year) {
 			score += 200
 		}
+		// Penalize results whose disambiguated year doesn't match the
+		// requested movie year. This prevents a wrong-period film
+		// (e.g. "Suspiria (2018 film)") from beating the correct film
+		// (e.g. "Suspiria" at 1977) via the generic "HasPrefix film"
+		// bonus below.
+		if titleYearMismatch(title, movie.Year) {
+			score -= 1000
+		}
 		if normal == filmTitle {
 			score += 1000
 		} else if strings.HasPrefix(normal, movieTitle+" ") && strings.Contains(normal, "film") {
@@ -163,6 +171,27 @@ func chooseWikipediaSearchResult(movie plex.Movie, results []wikipediaSearchResu
 		return ""
 	}
 	return bestTitle
+}
+
+// titleYearMismatch returns true when a parenthesized year in the title
+// does not match the given movie year. Only counts years inside
+// parentheses so that a movie whose actual title is a year (e.g. "2012"
+// from 2009) is not falsely penalized.
+func titleYearMismatch(title string, movieYear int) bool {
+	for _, word := range strings.Fields(title) {
+		// Only check content that was in brackets (disambiguators).
+		if len(word) < 2 || (word[0] != '(' && word[0] != '[') {
+			continue
+		}
+		content := word[1:]                  // skip opening bracket
+		stripped := strings.TrimRight(content, "()[]{},")
+		if len(stripped) >= 4 {
+			if yr, err := strconv.Atoi(stripped[:4]); err == nil && yr >= 1900 && yr <= 2099 && yr != movieYear {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isNonMovieWikipediaTitle(title string) bool {
