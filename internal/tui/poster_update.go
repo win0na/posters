@@ -40,11 +40,7 @@ func isNoIMPPosterError(err error) bool {
 
 func formatAmbiguousDetails(movie plex.Movie, err *posterfinder.AmbiguousMatchError) []string {
 	lines := []string{fmt.Sprintf("%s (%d):", movie.Title, movie.Year)}
-	for i, candidate := range err.Candidates {
-		if i >= 4 {
-			lines = append(lines, fmt.Sprintf("  +%d more", len(err.Candidates)-i))
-			break
-		}
+	for _, candidate := range err.Candidates {
 		bits := []string{candidate.PageURL}
 		if candidate.Version > 0 {
 			bits = append(bits, fmt.Sprintf("ver%d", candidate.Version))

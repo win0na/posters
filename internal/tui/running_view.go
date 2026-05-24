@@ -75,7 +75,7 @@ func doneViewportRows(maxRows int) int {
 }
 
 func (m Model) doneFullLines() []string {
-	sections := []string{ui.frameTitle.Render("Done."), section("Summary:", styleSummaryBlock(resultSummaryBlock(m.runStats)))}
+	sections := []string{ui.frameTitle.Render("Done."), section("Summary:", styleSummaryBlock(resultSummaryBlock(m.runStats, m.dryRun)))}
 	if m.reportPath != "" || m.reportCSVPath != "" {
 		lines := []string{}
 		if m.reportPath != "" {
@@ -91,7 +91,7 @@ func (m Model) doneFullLines() []string {
 	} else if recent := recentActivityView(m.log, 8); recent != "" {
 		sections = append(sections, section("Recent activity:", recent))
 	}
-	if details := tail(m.details, 8); details != "" {
+	if details := strings.Join(m.details, "\n"); details != "" {
 		sections = append(sections, section("Ambiguous matches:", indentBlock(details, "  ")))
 	}
 	return strings.Split(strings.Join(sections, "\n\n"), "\n")
@@ -113,7 +113,8 @@ func formatReportItem(item config.ReportItem) string {
 	if status == "" {
 		status = "RESULT"
 	}
-	header := fmt.Sprintf("  %s %s", styleReportStatus(status), item.Title)
+	styled := styleReportStatus(status)
+	header := fmt.Sprintf("  %-12s %s", styled, item.Title)
 	if item.Year > 0 {
 		header += fmt.Sprintf(" (%d)", item.Year)
 	}

@@ -67,6 +67,7 @@ func resultSummary(stats runStats, dryRun bool) string {
 		fmt.Sprintf("skipped: %d", stats.Skipped),
 		fmt.Sprintf("ambiguous: %d", stats.Ambiguous),
 		fmt.Sprintf("failed: %d", stats.Failed),
+		fmt.Sprintf("blacklisted: %d", stats.Blacklisted),
 	}
 	if stats.Cancelled {
 		parts = append(parts, "cancelled")
@@ -74,17 +75,22 @@ func resultSummary(stats runStats, dryRun bool) string {
 	return strings.Join(parts, " · ")
 }
 
-func resultSummaryBlock(stats runStats) string {
-	lines := []string{
-		fmt.Sprintf("Updated:   %d", stats.Updated),
-		fmt.Sprintf("Dry runs:  %d", stats.DryRun),
-		fmt.Sprintf("Wiki:      %d", stats.WikiFallback),
-		fmt.Sprintf("Skipped:   %d", stats.Skipped),
-		fmt.Sprintf("Ambiguous: %d", stats.Ambiguous),
-		fmt.Sprintf("Failed:    %d", stats.Failed),
+func resultSummaryBlock(stats runStats, dryRun bool) string {
+	lines := []string{}
+	if dryRun {
+		lines = append(lines, fmt.Sprintf("%-12s %d", "Dry runs:", stats.DryRun))
+	} else {
+		lines = append(lines, fmt.Sprintf("%-12s %d", "Updated:", stats.Updated))
 	}
+	lines = append(lines,
+		fmt.Sprintf("%-12s %d", "Wiki:", stats.WikiFallback),
+		fmt.Sprintf("%-12s %d", "Skipped:", stats.Skipped),
+		fmt.Sprintf("%-12s %d", "Ambiguous:", stats.Ambiguous),
+		fmt.Sprintf("%-12s %d", "Failed:", stats.Failed),
+		fmt.Sprintf("%-12s %d", "Blacklisted:", stats.Blacklisted),
+	)
 	if stats.Cancelled {
-		lines = append(lines, "Status:    cancelled")
+		lines = append(lines, fmt.Sprintf("%-12s cancelled", "Status:"))
 	}
 	return strings.Join(lines, "\n")
 }

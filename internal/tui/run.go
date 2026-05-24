@@ -25,7 +25,7 @@ func (m Model) startRun() (tea.Model, tea.Cmd) {
 	m.runningActive = 0
 	m.runningCurrent = nil
 	m.progressCh = nil
-	m.runStats = runStats{Skipped: skippedUpdated + skippedBlacklisted}
+	m.runStats = runStats{Skipped: skippedUpdated, Blacklisted: skippedBlacklisted}
 	m.reportItems = skippedReportItems(selected, m.store)
 	m.reportPath = ""
 	m.reportCSVPath = ""
@@ -186,11 +186,10 @@ func skippedReportItems(selected []plex.Movie, store *config.Store) []config.Rep
 	items := []config.ReportItem{}
 	for _, movie := range selected {
 		if _, ok := metadata.Blacklist[movie.RatingKey]; ok {
-			items = append(items, config.ReportItem{RatingKey: movie.RatingKey, Title: movie.Title, Year: movie.Year, Status: "skipped", Message: "blacklisted"})
+			items = append(items, config.ReportItem{RatingKey: movie.RatingKey, Title: movie.Title, Year: movie.Year, Status: "blacklisted", Message: "blacklisted"})
 		}
 	}
-	return items
-}
+	return items}
 
 func (m *Model) recordUpdateResult(msg updateOneMsg) {
 	item := config.ReportItem{RatingKey: msg.movie.RatingKey, Title: msg.movie.Title, Year: msg.movie.Year, Message: msg.line, SourceURL: msg.sourceURL, ImageURL: msg.imageURL, MatchReason: msg.matchReason}
@@ -219,6 +218,17 @@ func (m *Model) recordUpdateResult(msg updateOneMsg) {
 		item.Status = "ambiguous"
 		item.Message = ambiguous.Summary()
 		item.Error = ""
+		item.Candidates = make([]config.CandidateInfo, len(ambiguous.Candidates))
+		for i, c := range ambiguous.Candidates {
+			item.Candidates[i] = config.CandidateInfo{
+				PageURL:        c.PageURL,
+				ImageURL:       c.ImageURL,
+				Version:        c.Version,
+				Canonical:      c.Canonical,
+				VisualScore:    c.VisualScore,
+				HasVisualScore: c.HasVisualScore,
+			}
+		}
 		m.reportItems = append(m.reportItems, item)
 		m.details = append(m.details, formatAmbiguousDetails(msg.movie, ambiguous)...)
 		return
@@ -255,7 +265,7 @@ func (m Model) finishRun(cancelled bool) Model {
 }
 
 func reportStats(stats runStats) config.ReportStats {
-	return config.ReportStats{Updated: stats.Updated, DryRun: stats.DryRun, WikiFallback: stats.WikiFallback, Skipped: stats.Skipped, Ambiguous: stats.Ambiguous, Failed: stats.Failed, Cancelled: stats.Cancelled}
+	return config.ReportStats{Updated: stats.Updated, DryRun: stats.DryRun, WikiFallback: stats.WikiFallback, Skipped: stats.Skipped, Blacklisted: stats.Blacklisted, Ambiguous: stats.Ambiguous, Failed: stats.Failed, Cancelled: stats.Cancelled}
 }
 
 func (m Model) fail(err error) (tea.Model, tea.Cmd) {

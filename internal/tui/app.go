@@ -135,6 +135,7 @@ type runStats struct {
 	DryRun       int
 	WikiFallback int
 	Skipped      int
+	Blacklisted  int
 	Ambiguous    int
 	Failed       int
 	Cancelled    bool

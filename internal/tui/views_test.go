@@ -23,7 +23,7 @@ func TestDoneViewIncludesSummaryAndDetails(t *testing.T) {
 	model.details = []string{"Alien 3 (1992):", "  - http://www.impawards.com/1992/alien_three.html"}
 
 	view := stripANSI(model.View())
-	for _, want := range []string{"Updated:   1", "Skipped:   2", "Ambiguous: 1", "Ambiguous matches:", "alien_three.html"} {
+	for _, want := range []string{"Updated:     1", "Skipped:     2", "Ambiguous:   1", "Ambiguous matches:", "alien_three.html"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() missing %q:\n%s", want, view)
 		}
@@ -40,13 +40,14 @@ func TestDoneViewShowsLegibleReportSections(t *testing.T) {
 	model := New(store, fakePlex{})
 	model.screen = screenDone
 	model.height = 80
+	model.dryRun = true
 	model.runStats = runStats{DryRun: 1}
 	model.reportPath = "/tmp/posters/report.json"
 	model.reportCSVPath = "/tmp/posters/report.csv"
 	model.reportItems = []config.ReportItem{{Title: "Alien", Year: 1979, Status: "dry-run", SourceURL: "http://www.impawards.com/1979/alien.html", ImageURL: "http://www.impawards.com/1979/posters/alien_xxlg.jpg", MatchReason: "visual match score 0.991"}}
 
 	view := stripANSI(model.View())
-	for _, want := range []string{"Summary:", "Reports:", "Results:", "DRY-RUN Alien (1979)", "IMP page:", "Image:", "Match:"} {
+	for _, want := range []string{"Summary:", "Reports:", "Results:", "Dry runs:", "DRY-RUN", "Alien (1979)", "IMP page:", "Image:", "Match:"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("View() missing %q:\n%s", want, view)
 		}

@@ -356,4 +356,10 @@ func TestRecordUpdateResultAmbiguousDetails(t *testing.T) {
 	if !strings.Contains(model.reportItems[0].Message, "best visual match 78.0%") {
 		t.Fatalf("message = %q, want best visual match", model.reportItems[0].Message)
 	}
+	if len(model.reportItems[0].Candidates) != 2 {
+		t.Fatalf("candidates = %#v, want 2", model.reportItems[0].Candidates)
+	}
+	if model.reportItems[0].Candidates[0].PageURL != "http://www.impawards.com/1979/alien.html" || !model.reportItems[0].Candidates[0].HasVisualScore {
+		t.Fatalf("candidate[0] = %#v", model.reportItems[0].Candidates[0])
+	}
 }
