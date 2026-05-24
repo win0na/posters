@@ -1,9 +1,13 @@
 package posters
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"net/url"
 	"strconv"
 	"strings"
@@ -23,6 +27,13 @@ func (s *Service) FindWikipediaPoster(ctx context.Context, movie plex.Movie) (Ca
 	data, err := s.downloadWikipediaImage(ctx, imageURL)
 	if err != nil {
 		return Candidate{}, err
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err == nil {
+		bounds := img.Bounds()
+		if bounds.Dx() > bounds.Dy() {
+			return Candidate{}, fmt.Errorf("wikipedia poster for %s (%d) is landscape (w=%d h=%d), not a standard theatrical poster", movie.Title, movie.Year, bounds.Dx(), bounds.Dy())
+		}
 	}
 	return Candidate{Movie: movie, ImageURL: imageURL, SourceURL: imageURL, MatchReason: "Wikipedia fallback theatrical poster", Bytes: data}, nil
 }
@@ -140,17 +151,9 @@ func chooseWikipediaSearchResult(movie plex.Movie, results []wikipediaSearchResu
 		if strings.Contains(text, year) {
 			score += 200
 		}
-		// Penalize results whose disambiguated year doesn't match the
-		// requested movie year. This prevents a wrong-period film
-		// (e.g. "Suspiria (2018 film)") from beating the correct film
-		// (e.g. "Suspiria" at 1977) via the generic "HasPrefix film"
-		// bonus below.
-		if titleYearMismatch(title, movie.Year) {
-			score -= 1000
-		}
 		if normal == filmTitle {
 			score += 1000
-		} else if strings.HasPrefix(normal, movieTitle+" ") && strings.Contains(normal, "film") {
+		} else if strings.HasPrefix(normal, movieTitle+" ") && strings.Contains(normal, "film") && !titleYearMismatch(title, movie.Year) {
 			score += 900
 		} else if normal != movieTitle && !strings.Contains(title, "(") && titleMatches(movie.Title, title) {
 			if result.Snippet == "" {
