@@ -62,21 +62,32 @@ type ReportStats struct {
 	DryRun       int  `json:"dry_run"`
 	WikiFallback int  `json:"wiki_fallback"`
 	Skipped      int  `json:"skipped"`
+	Blacklisted  int  `json:"blacklisted"`
 	Ambiguous    int  `json:"ambiguous"`
 	Failed       int  `json:"failed"`
 	Cancelled    bool `json:"cancelled"`
 }
 
+type CandidateInfo struct {
+	PageURL       string  `json:"page_url"`
+	ImageURL      string  `json:"image_url,omitempty"`
+	Version       int     `json:"version,omitempty"`
+	Canonical     bool    `json:"canonical"`
+	VisualScore   float64 `json:"visual_score,omitempty"`
+	HasVisualScore bool   `json:"has_visual_score,omitempty"`
+}
+
 type ReportItem struct {
-	RatingKey   string `json:"rating_key"`
-	Title       string `json:"title"`
-	Year        int    `json:"year,omitempty"`
-	Status      string `json:"status"`
-	Message     string `json:"message"`
-	SourceURL   string `json:"source_url,omitempty"`
-	ImageURL    string `json:"image_url,omitempty"`
-	MatchReason string `json:"match_reason,omitempty"`
-	Error       string `json:"error,omitempty"`
+	RatingKey   string          `json:"rating_key"`
+	Title       string          `json:"title"`
+	Year        int             `json:"year,omitempty"`
+	Status      string          `json:"status"`
+	Message     string          `json:"message"`
+	SourceURL   string          `json:"source_url,omitempty"`
+	ImageURL    string          `json:"image_url,omitempty"`
+	MatchReason string          `json:"match_reason,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	Candidates  []CandidateInfo `json:"candidates,omitempty"`
 }
 
 type RunReport struct {
