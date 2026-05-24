@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"math"
 )
 
@@ -38,7 +41,7 @@ func imageFingerprints(data []byte) ([]visualFingerprint, error) {
 	}
 	bounds := img.Bounds()
 	fps := []visualFingerprint{fingerprintImageBounds(img, bounds)}
-	for _, b := range []image.Rectangle{trimPosterBorderBounds(img), insetBounds(bounds, 0.02), insetBounds(bounds, 0.04)} {
+	for _, b := range []image.Rectangle{trimPosterBorderBounds(img), trimLightPosterBorderBounds(img), insetBounds(bounds, 0.02), insetBounds(bounds, 0.04)} {
 		if b.Empty() || b == bounds || b.Dx() < visualSampleSize || b.Dy() < visualSampleSize {
 			continue
 		}
@@ -156,6 +159,75 @@ func pixelLooksLikeBorder(c color.Color) bool {
 	return spread < 0.08 && (lum > 0.88 || lum < 0.08)
 }
 
+func trimLightPosterBorderBounds(img image.Image) image.Rectangle {
+	bounds := img.Bounds()
+	maxXTrim := bounds.Dx() * 35 / 100
+	maxYTrim := bounds.Dy() * 35 / 100
+	left := findContentColumn(img, bounds, bounds.Min.X, bounds.Max.X, 1, maxXTrim)
+	right := findContentColumn(img, bounds, bounds.Max.X-1, bounds.Min.X-1, -1, maxXTrim)
+	top := findContentRow(img, bounds, bounds.Min.Y, bounds.Max.Y, 1, maxYTrim)
+	bottom := findContentRow(img, bounds, bounds.Max.Y-1, bounds.Min.Y-1, -1, maxYTrim)
+	trimmed := image.Rect(left, top, right+1, bottom+1)
+	if trimmed.Dx() < visualSampleSize || trimmed.Dy() < visualSampleSize || trimmed == bounds {
+		return bounds
+	}
+	return trimmed
+}
+
+func findContentColumn(img image.Image, bounds image.Rectangle, start, stop, step, maxTrim int) int {
+	trimmed := 0
+	for x := start; x != stop && trimmed < maxTrim; x += step {
+		if columnHasPosterContent(img, bounds, x) {
+			return x
+		}
+		trimmed++
+	}
+	return start
+}
+
+func findContentRow(img image.Image, bounds image.Rectangle, start, stop, step, maxTrim int) int {
+	trimmed := 0
+	for y := start; y != stop && trimmed < maxTrim; y += step {
+		if rowHasPosterContent(img, bounds, y) {
+			return y
+		}
+		trimmed++
+	}
+	return start
+}
+
+func columnHasPosterContent(img image.Image, bounds image.Rectangle, x int) bool {
+	const samples = 64
+	content := 0
+	for i := 0; i < samples; i++ {
+		y := bounds.Min.Y + i*bounds.Dy()/samples
+		if !pixelLooksLikeLightBorder(img.At(x, y)) {
+			content++
+		}
+	}
+	return float64(content)/samples >= 0.18
+}
+
+func rowHasPosterContent(img image.Image, bounds image.Rectangle, y int) bool {
+	const samples = 64
+	content := 0
+	for i := 0; i < samples; i++ {
+		x := bounds.Min.X + i*bounds.Dx()/samples
+		if !pixelLooksLikeLightBorder(img.At(x, y)) {
+			content++
+		}
+	}
+	return float64(content)/samples >= 0.18
+}
+
+func pixelLooksLikeLightBorder(c color.Color) bool {
+	r, g, b, _ := c.RGBA()
+	rf, gf, bf := float64(r)/65535.0, float64(g)/65535.0, float64(b)/65535.0
+	lum := 0.299*rf + 0.587*gf + 0.114*bf
+	spread := math.Max(rf, math.Max(gf, bf)) - math.Min(rf, math.Min(gf, bf))
+	return lum > 0.82 && spread < 0.16
+}
+
 func insetBounds(bounds image.Rectangle, frac float64) image.Rectangle {
 	dx := int(float64(bounds.Dx()) * frac)
 	dy := int(float64(bounds.Dy()) * frac)
@@ -178,7 +250,7 @@ func visualSimilarity(a, b visualFingerprint) float64 {
 	color := histogramIntersection(a.colorHist[:], b.colorHist[:])
 	aspect := aspectSimilarity(a.width, a.height, b.width, b.height)
 	contrast := 1 - math.Min(1, math.Abs(a.lumaStdDev-b.lumaStdDev))
-	return 0.36*avg + 0.28*diff + 0.26*color + 0.06*aspect + 0.04*contrast
+	return 0.44*avg + 0.16*diff + 0.30*color + 0.06*aspect + 0.04*contrast
 }
 
 func boolSimilarity(a, b []bool) float64 {
