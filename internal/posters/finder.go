@@ -143,13 +143,43 @@ type Service struct {
 }
 
 type hostLimiter struct {
-	mu        sync.Mutex
-	lastFetch time.Time
-	delay     time.Duration
+	sem chan struct{}
+}
+
+func newHostLimiter(max int) *hostLimiter {
+	return &hostLimiter{sem: make(chan struct{}, max)}
+}
+
+const (
+	impMaxConcurrent          = 4
+	wikipediaAPIMaxConcurrent = 2
+	wikiImageMaxConcurrent    = 4
+	defaultMaxConcurrent      = 4
+)
+
+func hostMaxConcurrent(host string) int {
+	switch host {
+	case "en.wikipedia.org":
+		return wikipediaAPIMaxConcurrent
+	case "upload.wikimedia.org", "commons.wikimedia.org":
+		return wikiImageMaxConcurrent
+	case "www.impawards.com", "impawards.com":
+		return impMaxConcurrent
+	default:
+		return defaultMaxConcurrent
+	}
 }
 
 func NewService() *Service {
-	return &Service{http: &http.Client{Timeout: 30 * time.Second}, cacheDir: defaultCacheDir()}
+	transport := &http.Transport{
+		MaxIdleConns:        50,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	return &Service{
+		http:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		cacheDir: defaultCacheDir(),
+	}
 }
 
 func (s *Service) FindTheatricalPoster(ctx context.Context, movie plex.Movie) (Candidate, error) {

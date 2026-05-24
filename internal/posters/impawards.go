@@ -6,28 +6,61 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/win0na/posters/internal/plex"
 )
 
 func (s *Service) impCandidates(ctx context.Context, movie plex.Movie) ([]impCandidate, error) {
 	for _, searchMovie := range impSearchMovies(movie) {
-		for _, year := range impCandidateYears(searchMovie.Year) {
-			candidates, err := s.impCandidatesForYear(ctx, searchMovie, year, false)
-			if err == nil && len(candidates) > 0 {
-				return candidates, nil
-			}
+		if candidates := s.probeYearsConcurrent(ctx, searchMovie, false); candidates != nil {
+			return candidates, nil
 		}
 	}
 	for _, searchMovie := range impSearchMovies(movie) {
-		for _, year := range impCandidateYears(searchMovie.Year) {
-			candidates, err := s.impCandidatesForYear(ctx, searchMovie, year, true)
-			if err == nil && len(candidates) > 0 {
-				return candidates, nil
-			}
+		if candidates := s.probeYearsConcurrent(ctx, searchMovie, true); candidates != nil {
+			return candidates, nil
 		}
 	}
 	return nil, fmt.Errorf("no IMP Awards poster found for %s (%d)", movie.Title, movie.Year)
+}
+
+// probeYearsConcurrent probes all candidate years concurrently and returns
+// candidates from the first year that finds a match, cancelling remaining probes.
+func (s *Service) probeYearsConcurrent(ctx context.Context, movie plex.Movie, includeSearch bool) []impCandidate {
+	years := impCandidateYears(movie.Year)
+	if len(years) == 0 {
+		return nil
+	}
+	resultCh := make(chan []impCandidate, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, year := range years {
+		year := year
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			candidates, err := s.impCandidatesForYear(ctx, movie, year, includeSearch)
+			if err == nil && len(candidates) > 0 {
+				select {
+				case resultCh <- candidates:
+				case <-ctx.Done():
+				}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	for candidates := range resultCh {
+		return candidates
+	}
+	return nil
 }
 
 func impSearchMovies(movie plex.Movie) []plex.Movie {

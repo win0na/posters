@@ -40,6 +40,7 @@ func (s *Service) fetchTextUncached(ctx context.Context, rawURL string) (string,
 	if err := s.throttle(ctx, rawURL); err != nil {
 		return "", err
 	}
+	defer s.releaseThrottle(rawURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", err
@@ -111,6 +112,7 @@ func (s *Service) downloadImageUncached(ctx context.Context, rawURL string) ([]b
 	if err := s.throttle(ctx, rawURL); err != nil {
 		return nil, err
 	}
+	defer s.releaseThrottle(rawURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -187,41 +189,37 @@ func (s *Service) hasFreshNegativeCache(rawURL string) bool {
 	return time.Since(created) < negativeCacheTTL
 }
 
-func (s *Service) throttle(ctx context.Context, rawURL string) error {
-	delay := 250 * time.Millisecond
-	if parsed, err := url.Parse(rawURL); err == nil {
-		switch parsed.Hostname() {
-		case "en.wikipedia.org", "upload.wikimedia.org", "commons.wikimedia.org":
-			delay = 100 * time.Millisecond
-		}
-	}
+func (s *Service) getLimiter(host string) *hostLimiter {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.limiters == nil {
 		s.limiters = map[string]*hostLimiter{}
 	}
+	if _, ok := s.limiters[host]; !ok {
+		s.limiters[host] = newHostLimiter(hostMaxConcurrent(host))
+	}
+	return s.limiters[host]
+}
+
+func (s *Service) throttle(ctx context.Context, rawURL string) error {
 	host := "default"
 	if parsed, err := url.Parse(rawURL); err == nil && parsed.Host != "" {
 		host = parsed.Host
 	}
-	limiter := s.limiters[host]
-	if limiter == nil {
-		limiter = &hostLimiter{delay: delay}
-		s.limiters[host] = limiter
+	limiter := s.getLimiter(host)
+	select {
+	case limiter.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	s.mu.Unlock()
+}
 
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-	wait := time.Until(limiter.lastFetch.Add(limiter.delay))
-	if wait > 0 {
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+func (s *Service) releaseThrottle(rawURL string) {
+	host := "default"
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Host != "" {
+		host = parsed.Host
 	}
-	limiter.lastFetch = time.Now()
-	return nil
+	limiter := s.getLimiter(host)
+	<-limiter.sem
 }
