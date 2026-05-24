@@ -18,7 +18,9 @@ func impProbeURLs(movie plex.Movie) []string {
 
 func impProbeURLsForYear(movie plex.Movie, year int) []string {
 	urls := impCanonicalProbeURLsForYear(movie, year)
-	return append(urls, impVersionProbeURLsForYear(movie, year)...)
+	urls = append(urls, impVersionProbeURLsForYear(movie, year)...)
+	urls = append(urls, impShortenedCanonicalProbeURLsForYear(movie, year)...)
+	return urls
 }
 
 func impCanonicalProbeURLsForYear(movie plex.Movie, year int) []string {
@@ -26,6 +28,24 @@ func impCanonicalProbeURLsForYear(movie plex.Movie, year int) []string {
 	for _, slug := range titleSlugs(movie.Title) {
 		base := fmt.Sprintf("%s/%d/%s", impBase, year, slug)
 		urls = append(urls, base+".html")
+	}
+	return urls
+}
+
+func impShortenedCanonicalProbeURLsForYear(movie plex.Movie, year int) []string {
+	urls := []string{}
+	seen := map[string]bool{}
+	for _, slug := range titleSlugs(movie.Title) {
+		parts := strings.Split(slug, "_")
+		for len(parts) > 1 {
+			parts = parts[:len(parts)-1]
+			shortSlug := strings.Join(parts, "_")
+			if seen[shortSlug] {
+				continue
+			}
+			seen[shortSlug] = true
+			urls = append(urls, fmt.Sprintf("%s/%d/%s.html", impBase, year, shortSlug))
+		}
 	}
 	return urls
 }
@@ -39,6 +59,20 @@ func impVersionProbeURLsForYear(movie plex.Movie, year int) []string {
 		}
 	}
 	return urls
+}
+
+func versionURL(pageURL string, version int) string {
+	return fmt.Sprintf("%s_ver%d.html", strings.TrimSuffix(pageURL, ".html"), version)
+}
+
+func isFullTitleSlug(candidateURL string, movieTitle string) bool {
+	slug := strings.TrimSuffix(path.Base(candidateURL), ".html")
+	for _, titleSlug := range titleSlugs(movieTitle) {
+		if slug == titleSlug {
+			return true
+		}
+	}
+	return false
 }
 
 func impCandidateYears(year int) []int {
@@ -121,10 +155,35 @@ func titleMatches(movieTitle, candidateTitle string) bool {
 	}
 	movieTokens := strings.Fields(movie)
 	candidateTokens := strings.Fields(candidate)
+
+	// movie (≥2 tokens) is a prefix of a longer candidate title
+	// e.g. "Glass Onion" + "Glass Onion: A Knives Out Mystery"
 	if len(movieTokens) >= 2 && len(candidateTokens) > len(movieTokens) {
 		matchesPrefix := true
 		for i, token := range movieTokens {
 			if candidateTokens[i] != token {
+				matchesPrefix = false
+				break
+			}
+		}
+		if matchesPrefix {
+			return true
+		}
+	}
+
+	// candidate is a prefix of a longer movie title
+	// e.g. "Furiosa: A Mad Max Saga" + IMP heading "Furiosa"
+	// Require candidate >= 2 tokens or movie >= 3 tokens to avoid
+	// false matches from short movie titles with common words.
+	// "Glass Onion" + IMP heading "Glass" would match (bad).
+	// "Furiosa: A Mad Max Saga" + IMP heading "Furiosa" would match (good).
+	if len(movieTokens) > len(candidateTokens) {
+		if len(candidateTokens) < 2 && len(movieTokens) < 3 {
+			return false
+		}
+		matchesPrefix := true
+		for i, token := range candidateTokens {
+			if movieTokens[i] != token {
 				matchesPrefix = false
 				break
 			}
@@ -157,6 +216,10 @@ func articleSlugPartVariants(parts []string) [][]string {
 		moved := append([]string(nil), parts[1:]...)
 		moved = append(moved, parts[0])
 		variants = append(variants, moved)
+		// Also drop the article entirely — IMP often omits leading articles
+		// in slugs (e.g. "The Empire Strikes Back" → "empire_strikes_back").
+		dropped := parts[1:]
+		variants = append(variants, dropped)
 	}
 	return variants
 }

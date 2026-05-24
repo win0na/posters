@@ -119,6 +119,28 @@ func (s *Service) impCandidatesForYear(ctx context.Context, movie plex.Movie, ye
 			continue
 		}
 		candidates = append(candidates, candidate)
+		// If this candidate was found via a shortened slug (i.e. its
+		// slug is not one of the full title slugs), its version variants
+		// weren't probed by impVersionProbeURLsForYear. Add them now.
+		if candidate.Version == 0 && !isFullTitleSlug(candidate.PageURL, movie.Title) {
+			for v := 1; v <= 8; v++ {
+				verURL := versionURL(pageURL, v)
+				if !seen[verURL] {
+					pageURLs = append(pageURLs, verURL)
+				}
+			}
+		}
+		// Discover additional version variants from the canonical page body.
+		// IMP often has ver10+ (Tron has ver26, Mario has ver24) that aren't
+		// covered by the standard ver1-8 probe range. Scanning the page body
+		// finds only versions that actually exist on IMP.
+		if candidate.Version == 0 {
+			for _, verURL := range impVersionURLsFromBody(pageURL, body) {
+				if !seen[verURL] {
+					pageURLs = append(pageURLs, verURL)
+				}
+			}
+		}
 	}
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no IMP Awards poster found for %s (%d)", movie.Title, year)
@@ -141,11 +163,11 @@ func (s *Service) impSearchURLsForYear(ctx context.Context, movie plex.Movie, ye
 	seen := map[string]bool{}
 	urls := []string{}
 	for _, query := range queries {
-		body, err := s.fetchText(ctx, impSearchURL(query, 1))
+		body, err := s.fetchText(ctx, impSearchPHPURL(query))
 		if err != nil {
 			continue
 		}
-		for _, pageURL := range parseIMPSearchResults(impBase+"/cgi-bin/htsearch", body) {
+		for _, pageURL := range parseIMPSearchPHPResults(impBase+"/search.php", body) {
 			if seen[pageURL] || !looksLikeIMPMoviePage(pageURL, year) {
 				continue
 			}
@@ -156,6 +178,6 @@ func (s *Service) impSearchURLsForYear(ctx context.Context, movie plex.Movie, ye
 	return urls, nil
 }
 
-func impSearchURL(query string, page int) string {
-	return fmt.Sprintf("%s/cgi-bin/htsearch?words=%s;page=%d", impBase, url.QueryEscape(query), page)
+func impSearchPHPURL(query string) string {
+	return fmt.Sprintf("%s/search.php?search_data=%s", impBase, url.QueryEscape(query))
 }

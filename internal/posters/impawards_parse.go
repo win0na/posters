@@ -70,6 +70,27 @@ func parseIMPPageLinksForTitle(baseURL, body, title string, year int) []string {
 	return urls
 }
 
+func parseIMPSearchPHPResults(baseURL, body string) []string {
+	seen := map[string]bool{}
+	urls := []string{}
+	for _, match := range impSearchPHPRE.FindAllStringSubmatch(body, -1) {
+		if len(match) < 4 {
+			continue
+		}
+		raw := strings.Trim(match[1], "\"'")
+		pageURL := absoluteURL(baseURL, raw)
+		if seen[pageURL] || !isIMPURL(pageURL) {
+			continue
+		}
+		if !strings.HasSuffix(pageURL, ".html") {
+			continue
+		}
+		seen[pageURL] = true
+		urls = append(urls, pageURL)
+	}
+	return urls
+}
+
 func looksLikeIMPMoviePage(rawURL string, year int) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -214,4 +235,24 @@ func parseWikipediaPoster(title, body string) wikiPoster {
 	signal := strings.ToLower(poster.ImageURL + " " + poster.Alt + " " + poster.Caption)
 	poster.Poster = strings.Contains(signal, "poster") || strings.Contains(signal, "one-sheet") || strings.Contains(signal, "one sheet") || strings.Contains(signal, "theatrical")
 	return poster
+}
+
+// impVersionURLsFromBody extracts version variant URLs (_verN.html) from
+// a canonical page body. It uses the page URL's slug to match version
+// references (e.g. "tron_legacy_ver10.html" from tron_legacy.html).
+func impVersionURLsFromBody(pageURL, body string) []string {
+	base := strings.TrimSuffix(path.Base(pageURL), ".html")
+	re := regexp.MustCompile(regexp.QuoteMeta(base) + `_ver(\d+)\.html`)
+	matches := re.FindAllStringSubmatch(body, -1)
+	seen := map[string]bool{}
+	urls := []string{}
+	for _, m := range matches {
+		verURL := absoluteURL(pageURL, m[0])
+		if seen[verURL] {
+			continue
+		}
+		seen[verURL] = true
+		urls = append(urls, verURL)
+	}
+	return urls
 }

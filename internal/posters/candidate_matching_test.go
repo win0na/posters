@@ -35,13 +35,13 @@ func TestChooseCandidateWithoutWikipediaUsesCanonical(t *testing.T) {
 	}
 }
 
-func TestIMPSearchURL(t *testing.T) {
+func TestIMPSearchPHPURL(t *testing.T) {
 	t.Parallel()
 
-	got := impSearchURL("The Wild Robot 2024", 2)
-	want := "http://www.impawards.com/cgi-bin/htsearch?words=The+Wild+Robot+2024;page=2"
+	got := impSearchPHPURL("The Wild Robot 2024")
+	want := "http://www.impawards.com/search.php?search_data=The+Wild+Robot+2024"
 	if got != want {
-		t.Fatalf("impSearchURL() = %q, want %q", got, want)
+		t.Fatalf("impSearchPHPURL() = %q, want %q", got, want)
 	}
 }
 

@@ -20,7 +20,7 @@ const (
 	maxPosterSize          = 25 << 20
 	minVisualMatchScore    = 0.82
 	clearVisualMatchScore  = 0.70
-	clearVisualMatchMargin = 0.10
+	clearVisualMatchMargin = 0.08
 	negativeCacheTTL       = 14 * 24 * time.Hour
 	visualFetchConcurrency = 4
 )
@@ -33,6 +33,7 @@ var (
 	impImageRE    = regexp.MustCompile(`(?is)(?:href|src)=["']([^"']*posters/[^"']+\.(?:jpg|jpeg|png))["']`)
 	impSizePageRE = regexp.MustCompile(`(?is)href=["']([^"']*_(?:xlg|xxlg)\.html)["']`)
 	impLinkRE     = regexp.MustCompile(`(?is)<a\s+[^>]*href=["']([^"']+\.html)["'][^>]*>(.*?)</a>`)
+	impSearchPHPRE = regexp.MustCompile(`(?is)<a\s+href\s*=\s*([^>\s]+\.html)[^>]*>\s*<h3[^>]*>(.*?)</a>\s*\((\d{4})\)\s*</h3>`)
 	wikiImgRE     = regexp.MustCompile(`(?is)<table[^>]+class="[^"]*infobox[^"]*".*?<img[^>]+(?:src|data-src)="([^"]+)"[^>]*(?:alt="([^"]*)")?`)
 	wikiCapRE     = regexp.MustCompile(`(?is)<table[^>]+class="[^"]*infobox[^"]*".*?</table>`)
 	tagRE         = regexp.MustCompile(`(?is)<[^>]+>`)
